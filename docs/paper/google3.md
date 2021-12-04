@@ -19,14 +19,8 @@
 
   《The Google File System》发表于2003年。
 
-### 摘要
-
-
-
 ## [OSDI04] MapReduce
   《MapReduce: Simplified Data Processing on Large Clusters》发表于2004年。
-
-
 
 ## [OSDI06] BigTable
 
