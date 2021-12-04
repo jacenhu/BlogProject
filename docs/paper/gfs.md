@@ -31,6 +31,12 @@
 
 ### 2.2 接口
 
+文件在目录中以层次组织，并且以路径名标识。
+
+支持通常的操作：create、delete、open、close、read、write。
+
+此外支持：snapshot、record append。
+
 ### 2.3 架构
 
 ### 2.4 单主
