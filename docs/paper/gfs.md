@@ -39,6 +39,12 @@
 
 ### 2.3 架构
 
+文件被拆分成定长的chunk。每个chunk由一个不可变且全局唯一的64位标识。每个chunk在多个chunk server复制，默认是3副本。
+
+master维护所有的文件系统元数据。包括name space、访问控制信息、从文件到块的映射以及块的当前位置。同时控制系统范围的活动，如：chunk 租约管理，孤立chunk的垃圾回收，chunk server间的chunk 迁移。master通过与每个chunk server周期性的发送心跳消息进行通信来给它指令和收集它的状态。
+
+链接到每个应用程序的GFS客户端实现了文件系统API，同时与master、chunk server通信，代表应用程序进行数据的读写。客户端与master交互获取元数据，但所有的数据通信都是到chunk server。
+
 ### 2.4 单主
 
 ### 2.5 块大小
