@@ -91,7 +91,21 @@ master通过回放操作日志来恢复文件系统状态。
 
 ## 3 系统交互
 
+描述client、master、chunk server之间的交互，来实现数据的改变，原子性的记录追加和快照。
+
 ### 3.1 租约和变化顺序
+
+变化是指对诸如写操作或者追加操作等对文件的内容或者元数据进行改变的操作。
+
+GFS采用租约机制来保证副本间的一致性变化。master授予一个chunk lease给primary副本。primary副本获得对chunk的一系列变化顺序。所有的副本都遵循这种顺序。
+
+租约机制的设计目的是最小化master节点的管理开销。每个租约有60秒的超时时间。
+
+图2，解释了控制流：
+
+step1、client询问master，哪个chunk server拥有chunk的租约以及其它副本的位置。如果没有chunk server拥有租约，master会选择其中一个副本授予租约。
+
+step2、master回复了primary副本的标识和其它副本的位置。client缓存了这些信息以便于后续的变化。client只有在primary副本不可达或者不再拥有租约的时候才会再次与master交互。
 
 ### 3.2 数据流
 
