@@ -1,6 +1,6 @@
 # [SOSP'03] GFS 论文阅读
 
-在分布式系统领域，Google发表了三篇论文，奠定了大规模分布式存储系统的理论基础。
+在分布式系统领域，Google发表了三篇重要论文。分别是：
 
 [《The Google File System》]( https://research.google.com/archive/gfs-sosp2003.pdf)
 
@@ -8,11 +8,11 @@
 
 [《Bigtable: A Distributed Storage System for Structured Data》]( https://research.google.com/archive/bigtable-osdi06.pdf)
 
-本文涉及的《The Google File System》发表于2003年，介绍google文件系统的设计思想、关键逻辑流程。
+本文涉及的《The Google File System》发表于2003年，介绍google文件系统的设计思想、关键逻辑流程。重要内容是：整体架构设计,控制流与数据流分离，心跳，master管理元数据，租约机制，快照机制，命名空间读写锁，多副本排布考虑，数据重构，旧副本探测（chunk version number），垃圾回收，故障检测（checksum）等。
 
 ## 关键词
 
-故障容错，可扩展性。数据存储，集群存储
+故障容错，可扩展性，数据存储，集群存储
 
 ## 1 介绍
 
@@ -24,13 +24,11 @@
 
 第三、大部分文件的更新是通过追加新数据而不是覆盖已有数据。
 
-第四、共同设计应用程序和文件系统。
-
 ## 2 设计概述
 
 ### 2.1 假设
 
-* 系统由需要经常故障的廉价组件构成。
+* 系统由可能经常故障的组件构成。
 * 系统由一定数量的大文件组成。
 * 负载主要由两种读组成：大的流式读和小的随机读。
 * 负载有很多大的追加写。一旦写完成，文件将很少被修改。
@@ -49,15 +47,13 @@
 
 文件被拆分成定长的chunk。每个chunk由一个不可变且全局唯一的64位标识。每个chunk在多个chunk server复制，默认是3副本。
 
-master维护所有的文件系统元数据。包括name space、访问控制信息、从文件到chunk的映射以及chunk的当前位置。同时控制系统范围的活动，如：chunk 租约管理，失效chunk的垃圾回收，chunk server间的chunk 迁移。master通过与每个chunk server周期性的发送心跳消息进行通信来给它指令和收集它的状态。
+master维护所有的文件系统元数据。包括namespace、访问控制信息、从文件到chunk的映射以及chunk的位置。同时控制系统范围的活动，如：chunk 租约管理，失效chunk的垃圾回收，chunk server间的chunk 迁移。master通过与每个chunk server周期性的发送心跳消息进行通信来给它指令和收集它的状态。
 
 链接到每个应用程序的GFS客户端实现了文件系统API，同时与master、chunk server通信，代表应用程序进行数据的读写。客户端与master交互获取元数据，但所有的数据通信都是到chunk server。
 
 ![GFS 架构](./res/GFS_Architecture.png)
 
-### 2.4 单主
-
-客户端读写数据不需要经过master。
+### 2.4 单master
 
 客户端需要询问master它需要和哪个chunk server通信。
 
@@ -65,15 +61,11 @@ master维护所有的文件系统元数据。包括name space、访问控制信�
 
 ### 2.5 chunk大小
 
-chunk size是关键设计参数之一，GFS是64MB。
+chunk size是关键设计参数之一，GFS中是64MB。
 
 ### 2.6 元数据
 
 master主要存储三种类型的元数据：文件和chunk namespace、文件到chunk的映射、每个chunk 副本的位置。
-
-#### 2.6.1 内存中的数据结构
-
-元数据存储在内存中。
 
 #### 2.6.2 chunk的地址
 
@@ -89,21 +81,23 @@ master通过回放操作日志来恢复文件系统状态。
 
 #### 2.7 一致性模型
 
-#### 2.7.1 GFS的保证
+consistent: 所有的client可以看到相同的数据。
 
-文件name space变化是原子性的。
+defined：当文件处于consistent状态，并且所有的client可以看到变化写入的内容。
 
-#### 2.7.2 应用程序的影响
+inconsistent: 由于改变失败，不同的client看到不同的数据。
+
+![GFS 架构](./res/GFS_State.png)
 
 ## 3 系统交互
 
 描述client、master、chunk server之间的交互，来实现数据的改变，原子性的记录追加和快照。
 
-### 3.1 租约和变化顺序
+### 3.1 租约和变更顺序
 
-变化是指对诸如写操作或者追加操作等对文件的内容或者元数据进行改变的操作。
+变更是指对诸如写操作或者追加操作等对文件的内容或者元数据进行改变的操作。
 
-GFS采用租约机制来保证副本间的一致性变化。master授予一个chunk lease给primary副本。primary副本获得对chunk的一系列变化顺序。所有的副本都遵循这种顺序。
+GFS采用租约机制来保证副本间的一致性变化。master授予一个chunk lease给primary副本。primary副本获得对chunk的一系列变更顺序。所有的副本都遵循这种顺序。
 
 租约机制的设计目的是最小化master节点的管理开销。每个租约有60秒的超时时间。
 
@@ -111,9 +105,9 @@ GFS采用租约机制来保证副本间的一致性变化。master授予一个ch
 
 ![GFS 架构](./res/GFS_Flow.png)
 
-step1、client询问master，哪个chunk server拥有chunk的租约以及其它副本的位置。如果没有chunk server拥有租约，master会选择其中一个副本授予租约。
+step1、client询问master，拥有chunk的租约的chunkserver以及其它副本的位置。如果没有chunk server拥有租约，master会选择其中一个副本授予租约。
 
-step2、master回复了primary副本的标识和其它副本的位置。client缓存了这些信息以便于后续的变化。client只有在primary副本不可达或者不再拥有租约的时候才会再次与master交互。
+step2、master回复primary副本的标识和其它副本的位置。client缓存了这些信息以便于后续的变更。client只有在primary副本不可达或者不再拥有租约的时候才会再次与master交互。
 
 step3、client将数据推送到所有的副本。每个chunkserver将数据保存在LRU buffer cache中直到数据被使用或者淘汰过时。
 
@@ -133,21 +127,13 @@ GFS将数据流与控制流解耦，以有效利用网络。
 
 将B字节传输到R个副本的理想耗时是B/T + RL，其中T是网络吞吐量，L是在两台机器之间传输字节的时延。
 
-### 3.3 原子记录追加
-
-GFS提供了一种称为record append的原子追加操作。
-
 ### 3.4 快照
-
-快照操作在瞬间复制文件或目录树，同时最小化正在进行的突变的任何中断。
 
 GFS使用标准的写时复制技术来实现快照。当master收到快照请求，它首先撤销快照请求中对应的未到期租约。
 
 当租约被撤销或者过期，master会将操作日志记录到磁盘。然后通过复制源文件或者目录树的元数据，将日志记录应用到其内存状态。新创建的快照文件如同源文件一样指向相同的chunk。
 
-在快照操作之后，客户端在第一次写chunk C时吗，它会向master发送一个请求来找到当前的lease holder。master注意到chunk C的引用计数大于1。master将延迟回应client，而是选择一个新的chunk handle C’。然后，master要求每个当前拥有C的副本的chunkserver创建一个名为C '的chunk。
-
-处理C'。然后，它要求每个当前拥有C副本的块服务器创建一个名为C'的新块。通过在与原始块相同的chunkserver上创建新的块，我们确保数据可以在本地复制，而不是通过网络。master授予一个副本一个新的块C'的租约，并回应client让其正常写入块，而不知道它是刚从一个现有的块创建的。
+在快照操作之后，客户端在第一次写chunk C时，它会向master发送一个请求来找到当前的lease holder。master注意到chunk C的引用计数大于1。master将延迟回应client，而是选择一个新的chunk handle C’。然后，master要求每个当前拥有C的副本的chunkserver创建一个名为C '的chunk。通过在与原始chunk相同的chunkserver上创建新的chunk，我们确保数据可以在本地复制，而不是通过网络。master给一个副本授予新的chunk C'的租约，并回应client让其正常写入块。
 
 ## 4 主的操作
 
@@ -171,7 +157,13 @@ chunk副本的排布策略主要出于2个目的：第一、最大化数据可�
 
 ### 4.3 创建、重新复制、重新均衡
 
-chunk创建：当master创建块，空副本的放置考虑几个因素。（1）将新副本放置在低于磁盘利用率均值的chunkserver。（2）限制每个chunkserver最近创建的数量。（3）chunk副本跨机甲。
+chunk创建：当master创建块，空副本的放置考虑以下因素：
+
+（1）将新副本放置在低于磁盘利用率均值的chunkserver。
+
+（2）限制每个chunkserver最近创建的数量。
+
+（3）chunk副本跨机甲。
 
 chunk重新复制：当可用副本数量少于用户指定目标，master会重新复制chunk。此外，为防止复制流量挤压客户端流量，chunkserver会对通向源chunkserver服务器的读请求进行流控来限制耗费在复制上的带宽。
 
