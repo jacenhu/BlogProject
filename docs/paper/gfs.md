@@ -215,6 +215,20 @@ master和chunkserver都要能快速恢复状态。
 
 ### 5.2 数据完整性
 
+GFS的每个chunkserver使用校验和（checksumming）检测数据损坏。
+
+chunk按照64KB划分，每个都对应32bit的checksum。checksums被保存在内存中，并利用日志持久化。
+
+对于读请求，chunkserver在返回数据给请求者之前，会验证与读范围重叠的数据块的校验和。如果块的校验和与此前记录的不一致，chunkserver会返回错误给请求者，并将不匹配报告给master。然后，请求者会从其他副本读取数据，而master将从其他副本复制chunk。在一个有效的新副本就位后，master会通知此chunkserver（报告mismatch的）删除其副本。
+
+GFS客户端通过在校验和边界对齐进行读取操作，使得校验和对读性能影响较小。
+
+GFS对附加写时的checksum计算也进行了优化。即只增量更新最后一个部分块的checksum，然后对apend操作涉及的新checksum块  计算新的checksums。
+
+对于覆盖写，GFS必须读取并校验覆盖范围的第一个和最后一个block，然后执行写，最后计算和记录新的checksums。
+
+在空闲期间，chunkservers会扫描并验证非活跃的chunks。
+
 ### 5.3 诊断工具
 
 GFS通过诊断日志进行问题隔离、调试和性能分析。
