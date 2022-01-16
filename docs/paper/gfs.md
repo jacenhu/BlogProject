@@ -115,9 +115,9 @@ step1、client询问master，哪个chunk server拥有chunk的租约以及其它�
 
 step2、master回复了primary副本的标识和其它副本的位置。client缓存了这些信息以便于后续的变化。client只有在primary副本不可达或者不再拥有租约的时候才会再次与master交互。
 
-step3、client将数据推送到所有的副本。
+step3、client将数据推送到所有的副本。每个chunkserver将数据保存在LRU buffer cache中直到数据被使用或者淘汰过时。
 
-step4、一旦所有副本确认接收到数据，client就向primary副本发送写请求。
+step4、一旦所有副本确认接收到数据，client就向primary副本发送写请求。primary副本为所有的改变分配序列号并按照顺序应用到自己本地。
 
 step5、primary副本推送写请求到所有的secondary副本。每个secondary副本按照primary副本指定的相同序列号顺序去应用改变。
 
