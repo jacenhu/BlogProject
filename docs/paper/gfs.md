@@ -135,7 +135,7 @@ GFS使用标准的写时复制技术来实现快照。当master收到快照请�
 
 在快照操作之后，客户端在第一次写chunk C时，它会向master发送一个请求来找到当前的lease holder。master注意到chunk C的引用计数大于1。master将延迟回应client，而是选择一个新的chunk handle C’。然后，master要求每个当前拥有C的副本的chunkserver创建一个名为C '的chunk。通过在与原始chunk相同的chunkserver上创建新的chunk，我们确保数据可以在本地复制，而不是通过网络。master给一个副本授予新的chunk C'的租约，并回应client让其正常写入块。
 
-## 4 主的操作
+## 4 master的操作
 
 master执行所有namespace的操作。此外，它管理全系统的chunk副本：进行排布决策，创建新chunk和新副本，并协调全系统的活动。
 
