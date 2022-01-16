@@ -175,6 +175,12 @@ chunk重新均衡：master服务器会定期重新均衡副本。它会检查当
 
 ### 4.5 旧副本检测
 
+如果一个chunkserver故障了，并且忽略了chunk的改变，那么chunk副本可能会变得过时。对于每个chunk，master服务器维护一个块版本号(chunk version number)，以区分最新的和过时的副本。
+
+当master服务器对chunk授予新的租约时，会增加chunk版本号并且通知这些最新的副本。master和副本都会在他们的持久状态中记录新版本号。当其他某个副本当前不可用时，它的chunk版本号就不会增加。当chunkserver重启并报告chunk和相关版本号的集合时，master会检测到chunkserver有旧副本。当master看到版本号大于它所记录的，master认为它在授予租约时失败了，并将高版本号作为最新版本号。
+
+master服务器在其常规垃圾回收中删除过时的副本。在垃圾回收之前，当它响应客户端请求时，它能够有效的判定一个过时副本不存在。作为另一个保护措施，master通知client时，会包含chunk版本号。然后，客户端或者chunksever在执行操作的时候会校验版本号。
+
 ## 5 故障容错和诊断
 
 ### 5.1 高可用性
