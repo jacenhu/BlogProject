@@ -1,6 +1,14 @@
-# [SOSP03] GFS 论文阅读
+# [SOSP'03] GFS 论文阅读
 
-  《The Google File System》发表于2003年。
+在分布式系统领域，Google发表了三篇论文，奠定了大规模分布式存储系统的理论基础。
+
+[《The Google File System》]( https://research.google.com/archive/gfs-sosp2003.pdf)
+
+[《MapReduce: Simplified Data Processing on Large Clusters》]( https://research.google/pubs/pub62/)
+
+[《Bigtable: A Distributed Storage System for Structured Data》]( https://research.google.com/archive/bigtable-osdi06.pdf)
+
+本文涉及的《The Google File System》发表于2003年，介绍google文件系统的设计思想、关键逻辑流程。
 
 ## 关键词
 
@@ -183,15 +191,33 @@ master服务器在其常规垃圾回收中删除过时的副本。在垃圾回�
 
 ## 5 故障容错和诊断
 
+GFS系统设计的最大挑战之一是处理频繁的组件故障。
+
 ### 5.1 高可用性
+
+#### 5.1.1 快速恢复
+
+master和chunkserver都要能快速恢复状态。
+
+可能的异常：kill进程，超时，重连服务器等。
+
+#### 5.1.2 Chunk复制
+
+每个chunk在不同机架的多个chunkserver上复制。
+
+当master离线或通过checksum检测到损坏的副本时，master会复制现有副本以保持每个chunk完全复制。
+
+#### 5.1.3 master复制
+
+为保证可靠性，master的状态也是多副本保存。master的操作日志和checkpoint，被复制到多台机器。只有变更日志已经在所有的master副本刷盘，一个变更状态才认为被提交。
+
+即使在primary master down掉时，shadow master也能够提供文件系统的只读能力。
 
 ### 5.2 数据完整性
 
 ### 5.3 诊断工具
 
-
-
-## 7 经验
+GFS通过诊断日志进行问题隔离、调试和性能分析。
 
 ## 8 相关
 
@@ -214,6 +240,16 @@ GFS不寻求改变现有存储设备的模型，而是聚焦于基于现有的�
 GFS通过持续监控、复制关键数据和快速自动恢复来提供容错功能。Chunk多副本允许容忍chunkserver故障。故障的频率激发了一种新颖的在线修复机制，定期和透明地修复损坏，并尽快补偿丢失的副本。此外，GFS使用checksumming来检测磁盘或IDE子系统级别的数据损坏。
 
 GFS通过优化网络栈（分离文件系统控制和数据传输）实现了高吞吐。
+
+
+
+本文参考资料：
+
+Ghemawat, Sanjay, Howard Gobioff, and Shun-Tak Leung. "The Google file system." *Proceedings of the nineteenth ACM symposium on Operating systems principles*. 2003.
+
+
+
+
 
 
 
