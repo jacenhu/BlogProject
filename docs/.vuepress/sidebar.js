@@ -16,7 +16,7 @@ module.exports = {
           ],
         },
         {
-          title: '后端',
+          title: 'JAVA后端',
           collspsable: true,
           children: [
             '/program/end/开发环境配置',
@@ -40,12 +40,20 @@ module.exports = {
             '/program/cpp/mempool',
             '/program/cpp/CodingInterviewSummary',
             '/program/cpp/lowCode',
-            '/program/cpp/dataLakeWaht',
+            '/program/cpp/DataLakeWhat',
             '/program/cpp/designPattern',
           ],
         },
         {
-          title: 'other',
+          title: '论文',
+          collspsable: true,
+          children: [
+            '/program/paper/gfs',
+            '/program/paper/google3',
+          ],
+        },
+        {
+          title: '实践',
           collspsable: true,
           children: [
             '/program/other/harmonyPractice',
@@ -71,16 +79,6 @@ module.exports = {
             '/books/read/书单',
           ],
         },
-    ],
-    '/life/': [
-        {
-          title:'思考',
-          collspable:true,
-        },
-        {
-          title:'灵感',
-          collspable:true,
-        }
     ],
     // fallback
       '/': [

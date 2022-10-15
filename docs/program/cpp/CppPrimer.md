@@ -10,7 +10,7 @@
 ```cpp
 int main()
 {
-	return 0;
+    return 0;
 }
 ```
 
@@ -102,7 +102,7 @@ P30-P71
 
 如果想声明一个变量，而非定义它，需要使用extern关键词。
 
-``` C++
+``` cpp
 extern int i;    // 声明i而非定义i
 int j;           // 声明并定义j
 ```
@@ -199,14 +199,14 @@ C++新标准规定，允许将变量声明为constexpr类型以便由编译器�
 
 （1）使用关键词typedef
 
-```c++
+```cpp
 typedef double wages; //wages是double的同义词
 typedef wages *p; // p是double*的同义词
 ```
 
 （2）别名声明
 
-```c++
+```cpp
 using SI = Sales_item;  // SI是Sales_item的同义词
 ```
 
@@ -226,7 +226,7 @@ decltype类型指示符：选择并返回操作符的数据类型。只得到类
 
 （2）预处理器
 
-```c++
+```cpp
 #ifndef SALES_DATA_H
 #define SALES_DATA_H
 #endif
@@ -249,7 +249,7 @@ string表示可变长的字符序列，vector存放的是某种给定类型对�
 
 ### 命名空间的 using 声明
 
-```c++
+```cpp
 using namespace:name;
 ```
 
@@ -296,7 +296,7 @@ C++程序的头文件应该使用cname，而不应该使用name.h的形式
 
 遍历给定序列中的每个值执行某种操作
 
-```c++
+```cpp
 for (declaration : expression)
     statement
 ```
@@ -309,7 +309,7 @@ vector是一个类模板，而不是类型。
 
 （1）定义和初始化vector对象
 
-```c++
+```cpp
 vector<T> v1;
 vector<T> v2(v1);
 vector<T> v2 = v1;
@@ -329,7 +329,7 @@ vecrot<T> v5={a,b,c...}
 
 （3）其他vector操作
 
-```c++
+```cpp
 v.empty();
 v.size();
 v.push_back(t);
@@ -346,7 +346,7 @@ v[n];
 
 迭代器运算符
 
-```c++
+```cpp
 *iter            // 解引用，返回引用
 iter->mem        // 等价于  (*iter).mem
 ++iter
@@ -396,7 +396,7 @@ for(auto &row : a)
 	}
 ```
 
-```c++
+```cpp
 int *ip[4];    // 整型指针的数组
 int (*ip)[4];  // 指向含有4个整数的数组
 ```
@@ -453,7 +453,7 @@ P120-P151
 
 不要混淆相等运算符和赋值运算符
 
-```c++
+```cpp
 if (i = j)
 
 if (i == j)
@@ -469,14 +469,14 @@ if (i == j)
 
 点运算符和箭头运算符
 
-```c++
+```cpp
 n = (*p).size();
 n = p->size();
 ```
 
 ### 4.7 条件运算符
 
-```c++
+```cpp
 condition ? expression1 : expression2;
 ```
 
@@ -495,7 +495,7 @@ condition ? expression1 : expression2;
 
 sizeof运算符返回一条表达式或一个类型名字所占的字节数，其所得值是一个size_t类型，是一个常量表达式。
 
-```c++
+```cpp
 sizeof (type)
 sizeof expr
 ```
@@ -512,7 +512,7 @@ sizeof expr
 
 命名的强制类型转换
 
-```c++
+```cpp
 cast-name<type>(expression)
 
 // cast-name是static_cast,dynamic_cast,const_cast,reinterpret_cast
@@ -534,7 +534,7 @@ P154-P178
 
 （1）空语句
 
-```c++
+```cpp
 ;    // 空语句
 ```
 
@@ -542,7 +542,7 @@ P154-P178
 
 复合语句是指用花括号括起来的（可能为空的）语句和声明的序列，复合语句也被称作块（block）。
 
-```c++
+```cpp
 {}
 ```
 
@@ -575,7 +575,7 @@ while (condition)
 
 （2）传统 for 语句
 
-```c++
+```cpp
 for (initializar; condition; expression)
 		statement
 ```
@@ -584,14 +584,14 @@ for 语句中定义的对象只在for循环体内可见。
 
 （3）范围 for 语句
 
-```c++
+```cpp
 for (declaration : expression)
 		statement
 ```
 
 （4）do while 语句
 
-```c++
+```cpp
 do 
 	statement
 while (condition)
@@ -643,7 +643,7 @@ P182-P225
 
 局部静态对象：在程序的执行路径第一次经过对象定义语句时候进行初始化，并且直到程序终止才会被销毁。
 
-```c++
+```cpp
 size_t count_calls()
 {
 	static size_t ctr = 0;
@@ -679,7 +679,7 @@ size_t count_calls()
 
 为函数传递一个数组时，实际上传递的是指向数组首元素的指针。
 
-```c++
+```cpp
 void print(const int*);
 void pring(const int[]);
 void print(const int[10]);
@@ -688,7 +688,7 @@ void print(const int[10]);
 
 数组引用实参： f(int (&arr)[10])
 
-```c++
+```cpp
 int *matrix[10];   // 10个指针构成的数组
 int (*matrix)[10]; // 指向含有10个整数的数组的指针
 ```
@@ -697,7 +697,7 @@ int (*matrix)[10]; // 指向含有10个整数的数组的指针
 
 initializer_list
 
-```c++
+```cpp
 for err_msg(initializer_list<string> li)
 ```
 
@@ -705,7 +705,7 @@ for err_msg(initializer_list<string> li)
 
 2种：无返回值函数和右返回值函数。
 
-```c++
+```cpp
 return;
 return expression;
 ```
@@ -734,7 +734,7 @@ return expression;
 
 函数调用时，实参按其位置解析，默认实参负责填补函数调用缺少的尾部实参。
 
-```c++
+```cpp
 typedef string::size_type sz;
 string screen(sz ht = 24, sz wid = 80, char background = ' ');
 ```
@@ -765,7 +765,7 @@ Step2:寻找最佳匹配。
 
 函数指针指向的是函数而非对象。
 
-```c++
+```cpp
 void useBigger (const string &s1, const string &s2, bool pf(const string &, const string &));
 等价于
 void useBigger (const string &s1, const string &s2, bool (*pf)(const string &, const string &));
@@ -787,13 +787,13 @@ P228-P273
 
 任何对类成员的直接访问都被看作this的隐式引用。
 
-```c++
+```cpp
 std::string isbn() const {return bookNo;}
 ```
 
 等价于
 
-```c++
+```cpp
 std::string isbn() const {return this->bookNo;}
 ```
 
@@ -801,7 +801,7 @@ std::string isbn() const {return this->bookNo;}
 
 类外部定义的成员的名字必须包含它所属的类名。
 
-```c++
+```cpp
 double Sales_data::avg_price() const {
 	if (units_sol)
 		return revenue/units_sols;
@@ -853,7 +853,7 @@ double Sales_data::avg_price() const {
 
 :::
 
-```c++
+```cpp
 // Sales_data.h
 
 class Sales_data {
@@ -901,7 +901,7 @@ print(ostream &os, const Sales_data &item)
 
 （1）重载成员变量
 
-```c++
+```cpp
 Screen myScrren;
 char ch = myScreen.get();
 ch = myScreen.get(0,0);
@@ -911,7 +911,7 @@ ch = myScreen.get(0,0);
 
 类内初始值必须使用=或者{}的初始化形式。
 
-```c++
+```cpp
 class Window_mgr{
 private:
     std::vector<Screen> screens{Screen(24, 80, ' ')};
@@ -920,7 +920,7 @@ private:
 
 （3）基于const的重载
 
-```c++
+```cpp
 class Screen {
 public:
 	// display overloaded on whether the object is const or not
@@ -943,7 +943,7 @@ public:
 
 如果一个类指定了友元类，则友元类的成员函数可以访问此类包括非公有成员在内的所有成员。
 
-```c++
+```cpp
 class Screen {
 	// Window_mgr的成员可以访问Screen类的私有部分
 	friend class Window_mgr;
@@ -1496,7 +1496,7 @@ equal 是否相等
 ```cpp
 bool isShorter(const string &s1, const string &s2)
 {
-		retrun s1.size() < s2.size();
+    retrun s1.size() < s2.size();
 }
 
 sort(words.begin(), words.end(), isShorter);
@@ -1578,10 +1578,10 @@ ostream_iterator 向一个输出流写数据
 
 | istream-iterator操作               |                                                              |
 | ---------------------------------- | ------------------------------------------------------------ |
-| istream_iterator<T> in(is);        | in从输入流is读取类型为T的值                                  |
-| istream_iterator<T> end;           | 读取类型为T的值得istream_iterator迭代器，表示尾后位置        |
+| istream_iterator\<T\> in(is);        | in从输入流is读取类型为T的值                                  |
+| istream_iterator\<T\> end;           | 读取类型为T的值得istream_iterator迭代器，表示尾后位置        |
 | in1 == in2              in1 != in2 | in1和in2必须读取相同类型。如果它们都是尾后迭代器，或绑定到相同的输入，则两者相等 |
-| *in                                | 返回从流中读取的值                                           |
+| *in                                | 返回从流中读取的值                                            |
 | in->mem                            | 与(*in).mem含义相同                                          |
 | ++in, in++                         | 用>>从输入流读取下一个值                                     |
 
@@ -1589,8 +1589,8 @@ ostream_iterator 向一个输出流写数据
 
 | ostream_iterator操作            |                                                              |
 | ------------------------------- | ------------------------------------------------------------ |
-| ostream_iterator<T> out(os);    | out将类型为T的值写到输出流os中                               |
-| ostream_iterator<T> out(os, d); | out将类型为T的值写到输出流os中，每个值后面都输出一个d。d指向一个空字符串结尾的字符数组 |
+| ostream_iterator\<T\> out(os);    | out将类型为T的值写到输出流os中                               |
+| ostream_iterator\<T\> out(os, d); | out将类型为T的值写到输出流os中，每个值后面都输出一个d。d指向一个空字符串结尾的字符数组 |
 | out = val                       | 用<<将val写入到out所绑定的ostream中                          |
 | *out, ++out, out++              |                                                              |
 
@@ -1612,7 +1612,7 @@ ostream_iterator 向一个输出流写数据
 
 对于list、forward_list，应该优先使用成员函数的算法而不是通用算法。
 
-### 术语
+### 10.7 术语
 
 cref标准库函数：返回一个可拷贝的对象，其中保存了一个指向不可拷贝类型的const对象的引用
 
@@ -1839,7 +1839,7 @@ delete表达式执行两个动作：销毁给定的指针指向的对象；释�
 
 | unique_ptr操作        |
 | --------------------- |
-| unique_ptr<T> u1      |
+| unique_ptr\<T\> u1      |
 | unique_ptr<T, D> u2   |
 | unique_ptr<T, D> u(d) |
 | u = nullptr           |
@@ -1854,8 +1854,8 @@ weak+ptr是一种不受控制所指向对象生存期的智能指针，它指向
 
 | weak_ptr 操作     |                               |
 | ----------------- | ----------------------------- |
-| weak_ptr<T> w     |                               |
-| weak_ptr<T> w(sp) |                               |
+| weak_ptr\<T\> w     |                               |
+| weak_ptr\<T\> w(sp) |                               |
 | w = p             |                               |
 | w.reset()         | 将w置空                       |
 | w.use_count()     | 与w共享对象的shared_ptr的数量 |

@@ -1,4 +1,4 @@
-# vscode运行c++
+# vscode运行C++
 
 ## 安装gcc
 
@@ -18,7 +18,7 @@ cmd中验证
 
 ## 安装扩展
 
-> c/c++扩展,又名 cpptools,提供debug和Format功能
+> c/C++扩展,又名 cpptools,提供debug和Format功能
 
 > codeRuner扩展
 

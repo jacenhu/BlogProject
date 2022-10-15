@@ -13,12 +13,8 @@ module.exports=[
         link:'/books/',
     },
     {
-        text:'生活',
-        link:'/life/',
-    },
-    {
         text:'知乎',
-        link: 'https://www.zhihu.com/people/michelin-93',
+        link: 'https://www.zhihu.com/people/jacenhu',
         target:'_blank'
     },
     {
