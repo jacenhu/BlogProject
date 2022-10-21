@@ -106,10 +106,8 @@
 
 #### 3.3.11 责任者模式
 
-
-
-
 ## 4 参考资料
-[1] 图说设计模式
-https://design-patterns.readthedocs.io/zh_CN/latest/
 
+[1] 图说设计模式
+
+https://design-patterns.readthedocs.io/zh_CN/latest/
