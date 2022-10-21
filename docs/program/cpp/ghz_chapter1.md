@@ -249,12 +249,14 @@ make -j
 
 ##### 4.2.2.3 结果解释
 
-count - 已完成的请求总数，包括成功的和失败的请求。
-total - 从开始到结束的测试总时间。
-slowest - 最慢的请求的耗时。
-fastest - 最快的请求的耗时。
-average - 平均的请求耗时.
-requests/sec - 每秒的请求数量，计算公式：count/total。
+| 输出项| 含义 |
+| :--- | :--- |
+| count | 已完成的请求总数，包括成功的和失败的请求。 |
+| total | 从开始到结束的测试总时间。 |
+| slowest | 最慢的请求的耗时。 |
+| fastest | 最快的请求的耗时。 |
+| average | 平均的请求耗时. |
+| requests/sec | 每秒的请求数量，计算公式：count/total。 |
 
 ## 5 参考资料
 

@@ -22,6 +22,8 @@
 * [《剑指offer》小结](/program/cpp/CodingInterviewSummary.md)
 * [什么是低代码](/program/cpp/lowCode.md)
 * [什么是数据湖？及其架构](/program/cpp/dataLakeWhat.md)
+* [基于ghz进行gRpc框架性能压测](/program/cpp/ghz_chapter1.md)
+
 ## 论文
 * [Google三驾马车：GFS、MapReduce、Bigtable](/program/paper/google3.md)
 * [SOSP'03 GFS 论文阅读](/program/paper/gfs.md)

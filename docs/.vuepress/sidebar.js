@@ -42,6 +42,7 @@ module.exports = {
             '/program/cpp/lowCode',
             '/program/cpp/DataLakeWhat',
             '/program/cpp/designPattern',
+            '/program/cpp/ghz_chapter1',
           ],
         },
         {
