@@ -65,6 +65,7 @@ module.exports = {
           collspsable: true,
           children: [
             '/program/tool/save',
+            '/program/tool/iperf3',
           ],
         },
     ],
