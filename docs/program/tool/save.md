@@ -8,7 +8,7 @@
 
 主题
 
-## markdwon的工具
+## markdown的工具
 
 （1） Emoji表情
 
@@ -17,7 +17,7 @@ https://github.com/markdown-it/markdown-it-emoji/blob/master/lib/data/full.json
 
 例如
 
-``` markdwon
+``` markdown
 :100:
 ```
 
@@ -25,13 +25,13 @@ https://github.com/markdown-it/markdown-it-emoji/blob/master/lib/data/full.json
 
 (2) 目录
 
-``` markdwon
+``` markdown
 [[toc]]
 ```
 
 (3) 自定义容器
 
-``` markdwon
+``` markdown
 ::: tip
 这是一个提示
 :::

@@ -1,24 +1,21 @@
 language: node_js
 
 node_js:
-  - 12
+  - 18
 
 cache:
   directories:
     - node_modules
 
-# build life cycle
 install:
   - npm install
-
-before script:
 
 script:
   - npm run build
 
-after script:
+after_script:
   - set -e
-  - cd docs/.vuepress/dist
+  - cd docs/.vitepress/dist
   - git init
   - git config user.name "${USER_NAME}"
   - git config user.email "${USER_EMAIL}"

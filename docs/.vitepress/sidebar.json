@@ -1,0 +1,212 @@
+{
+  "/program/": [
+    {
+      "text": "数据结构",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "数据结构（C language）",
+          "link": "/program/dataStructure/dataStructure"
+        },
+        {
+          "text": "算法与数据结构总结",
+          "link": "/program/dataStructure/AlgorithmAndDataStructure"
+        }
+      ]
+    },
+    {
+      "text": "前端",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "使用vuePress搭建个人博客",
+          "link": "/program/front/vuePress"
+        }
+      ]
+    },
+    {
+      "text": "JAVA后端",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "开发环境配置",
+          "link": "/program/end/开发环境配置"
+        },
+        {
+          "text": "SpringBoot实践",
+          "link": "/program/end/springBoot实践"
+        }
+      ]
+    },
+    {
+      "text": "C++",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "C++ Primer",
+          "link": "/program/cpp/CppPrimer"
+        },
+        {
+          "text": "常用数据结构与算法",
+          "link": "/program/cpp/dataStructure"
+        },
+        {
+          "text": "TCP/IP详解卷一",
+          "link": "/program/cpp/HTTPIP"
+        },
+        {
+          "text": "分布式存储系统Ceph",
+          "link": "/program/cpp/Ceph"
+        },
+        {
+          "text": "C++开发知识点整理",
+          "link": "/program/cpp/CppKnowledge"
+        },
+        {
+          "text": "TCP/IP协议知识总结",
+          "link": "/program/cpp/TCPSummary"
+        },
+        {
+          "text": "linux系统命令",
+          "link": "/program/cpp/linuxCommand"
+        },
+        {
+          "text": "计算机术语概念解释（持续更新）",
+          "link": "/program/cpp/Abstract"
+        },
+        {
+          "text": "vscode运行C++",
+          "link": "/program/cpp/vscodeCpp"
+        },
+        {
+          "text": "从招聘信息看分布式存储需掌握既能",
+          "link": "/program/cpp/JD"
+        },
+        {
+          "text": "内存池设计相关参考",
+          "link": "/program/cpp/mempool"
+        },
+        {
+          "text": "《剑指offer》小结",
+          "link": "/program/cpp/CodingInterviewSummary"
+        },
+        {
+          "text": "什么是低代码",
+          "link": "/program/cpp/lowCode"
+        },
+        {
+          "text": "什么是数据湖？及其架构",
+          "link": "/program/cpp/DataLakeWhat"
+        },
+        {
+          "text": "23种设计模式（updating）",
+          "link": "/program/cpp/designPattern"
+        },
+        {
+          "text": "基于ghz进行gRpc框架性能压测（1）",
+          "link": "/program/cpp/ghz_chapter1"
+        }
+      ]
+    },
+    {
+      "text": "论文",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "[SOSP'03] GFS 论文阅读",
+          "link": "/program/paper/gfs"
+        },
+        {
+          "text": "Google三驾马车：GFS、MapReduce、Bigtable",
+          "link": "/program/paper/google3"
+        }
+      ]
+    },
+    {
+      "text": "实践",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Hello world 鸿蒙OS App小实践",
+          "link": "/program/other/harmonyPractice"
+        }
+      ]
+    },
+    {
+      "text": "LLM",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "Windows安装与配置Claude Code",
+          "link": "/program/llm/install_claude_code"
+        },
+        {
+          "text": "Hermes Agent安装",
+          "link": "/program/llm/install_hermes_agent"
+        },
+        {
+          "text": "OpenClaw部署以及接入微信",
+          "link": "/program/llm/install_open_claw"
+        }
+      ]
+    },
+    {
+      "text": "存储",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "IO模式（size/latency分布）统计相关资料",
+          "link": "/program/storage/io_stat"
+        }
+      ]
+    },
+    {
+      "text": "工具",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "收藏",
+          "link": "/program/tool/save"
+        },
+        {
+          "text": "网络带宽性能分析工具iPerf3",
+          "link": "/program/tool/iperf3"
+        }
+      ]
+    }
+  ],
+  "/books/": [
+    {
+      "text": "书籍",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "《人间失格》读后感",
+          "link": "/books/read/人间失格"
+        },
+        {
+          "text": "《断舍离》读后感",
+          "link": "/books/read/断舍离"
+        },
+        {
+          "text": "《原则》读后感",
+          "link": "/books/read/原则"
+        },
+        {
+          "text": "《AI未来》 读后感",
+          "link": "/books/read/AI未来"
+        },
+        {
+          "text": "书籍推荐及我的2021年阅读计划",
+          "link": "/books/read/书单"
+        }
+      ]
+    }
+  ],
+  "/": [
+    {
+      "collapsed": true,
+      "items": []
+    }
+  ]
+}

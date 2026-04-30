@@ -45,9 +45,9 @@ $env:ENABLE_TOOL_SEARCH="false"
 ## 使用
 键入claude code，接下来就可以和cc对话了：
 
-![install-cc-01](./../../.vuepress/public/img/installcc/use_cc.png)
+![install-cc-01](/img/installcc/use_cc.png)
 
-![install-cc-01](./../../.vuepress/public/img/installcc/use_cc_2.png)
+![install-cc-01](/img/installcc/use_cc_2.png)
 
 
 ## 参考

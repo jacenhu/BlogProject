@@ -24,7 +24,7 @@ https://monday.com/
 
 快速创建适合任何业务需求的应用程序。
 
-![monday](./../../.vuepress/public/img/lowcode/monday.jpg)
+![monday](/img/lowcode/monday.jpg)
 
 2、Visual LANSA
 
@@ -32,7 +32,7 @@ https://lansa.com/
 
 低代码>>高控制
 
-![LANSA](./../../.vuepress/public/img/lowcode/LANSA.jpg)
+![LANSA](/img/lowcode/LANSA.jpg)
 
 3、Creatio
 
@@ -40,7 +40,7 @@ https://www.creatio.com/
 
 每个人都可以在数分钟内自动实现商业创意。
 
-![Creatio](./../../.vuepress/public/img/lowcode/Creatio.jpg)
+![Creatio](/img/lowcode/Creatio.jpg)
 
 4、Mendix
 
@@ -48,7 +48,7 @@ https://www.mendix.com/
 
 低代码应用开发平台。
 
-![Mendix](./../../.vuepress/public/img/lowcode/Mendix.jpg)
+![Mendix](/img/lowcode/Mendix.jpg)
 
 5、OutSystems
 
@@ -56,13 +56,13 @@ https://www.outsystems.com/
 
 快速构建企业级应用程序。
 
-![Outsystem](./../../.vuepress/public/img/lowcode/Outsystem.jpg)
+![Outsystem](/img/lowcode/Outsystem.jpg)
 
 6、阿里-宜搭
 
 https://www.aliwork.com/
 
-![yida](./../../.vuepress/public/img/lowcode/yida.jpg)
+![yida](/img/lowcode/yida.jpg)
 
 ## 参考资料
 1、[Low-code development platform](https://en.wikipedia.org/wiki/Low-code_development_platform)

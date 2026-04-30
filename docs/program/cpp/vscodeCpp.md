@@ -5,16 +5,16 @@
 在下面这个链接，下载g++
 https://sourceforge.net/projects/mingw-w64/files/
 
-![install_g++](./../../.vuepress/public/img/cpp/install_g++.png)
+![install_g++](/img/cpp/install_g++.png)
 
 解压到某个路径下，我安装到：C:\mingw64\bin
 
 然后加入到环境变量中。
 
-![install_Path](./../../.vuepress/public/img/cpp/install_Path.png)
+![install_Path](/img/cpp/install_Path.png)
 
 cmd中验证
-![install_Confirm](./../../.vuepress/public/img/cpp/install_Confirm.png)
+![install_Confirm](/img/cpp/install_Confirm.png)
 
 ## 安装扩展
 
@@ -22,7 +22,7 @@ cmd中验证
 
 > codeRuner扩展
 
-![install_Extension](./../../.vuepress/public/img/cpp/install_Extension.png)
+![install_Extension](/img/cpp/install_Extension.png)
 
 ## 其他工具
 >Bracket Pair Colorizer 2：彩虹花括号

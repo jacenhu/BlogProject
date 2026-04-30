@@ -38,7 +38,7 @@ source ~/.bashrc
 
 curl -fsSL https://openclaw.ai/install.sh | bash
 
-![openclaw-install-01](./../../.vuepress/public/img/openclawinstall/install-open-claw-script.png)
+![openclaw-install-01](/img/openclawinstall/install-open-claw-script.png)
 
 ### 其他配置
 
@@ -54,7 +54,7 @@ openclaw configure
 
 ```
 
-![openclaw-install-02](./../../.vuepress/public/img/openclawinstall/install-open-claw-model.png)
+![openclaw-install-02](/img/openclawinstall/install-open-claw-model.png)
 
 
 #### 添加 k2.6 模型定义
@@ -86,7 +86,7 @@ openclaw doctor         # 检查配置问题
 
 openclaw gateway status # 验证 Gateway 网关正在运行
 
-![openclaw-install-03](./../../.vuepress/public/img/openclawinstall/install-open-claw-gateway.png)
+![openclaw-install-03](/img/openclawinstall/install-open-claw-gateway.png)
 
 ### openclaw接入微信
 

@@ -4,14 +4,14 @@
 
 ## 一、安装node.js
 1. 进入[node.js下载页面](https://nodejs.org/en/download/)，根据操作系统类型选择特定版本下载。
-![node-download-pic](./../../.vuepress/public/img/vuepress/node-download.png)
+![node-download-pic](/img/vuepress/node-download.png)
 2. MacOS下，点击node-v12.pkg直接安装，各自安装至以下目录
 * Node.js v12.14.1 to /usr/local/bin/node
 * npm v6.13.4 to /usr/local/bin/npm
 3. 安装完成后，在terminal下，使用以下命令查看版本号
 * node -v
 * npm -v
-![node-version-pic](./../../.vuepress/public/img/vuepress/node-version.png)
+![node-version-pic](/img/vuepress/node-version.png)
 
 ## 二、安装vuePress,搭建博客框架
 1. 命令行输入：npm install -g vuepress
@@ -23,7 +23,7 @@
 2.2 创建子目录
 * /docs
 * /docs/.vuepress
-* /docs/.vuepress/public
+* /docs/
 
 2.3 创建js文件
 * config.js
@@ -36,9 +36,9 @@
 * 构建静态文件 npm run build
 * 发布 npm run dev
 出现如下图片，即编译成功。
-![npm-run-dev-pic](./../../.vuepress/public/img/vuepress/npm-run-dev.png)
-成功后，在浏览器窗口，输入http://localhost:8080/访问本地网站
-![localhost-site-pic](./../../.vuepress/public/img/vuepress/localhost-site.png)
+![npm-run-dev-pic](/img/vuepress/npm-run-dev.png)
+成功后，在浏览器窗口，输入 http://localhost:8080/ 访问本地网站
+![localhost-site-pic](/img/vuepress/localhost-site.png)
 
 ## 三、安装nginx
 > 本文档的开发环境：
@@ -54,7 +54,7 @@ sudo rpm -ivh http://nginx.org/packages/centos/7/noarch/RPMS/nginx-release-cento
 sudo yum install nginx
 3. 查看nginx安装路径  
 rpm -ql nginx
-![nginx-config-pic](./../../.vuepress/public/img/vuepress/nginx-config.png)
+![nginx-config-pic](/img/vuepress/nginx-config.png)
 4. 本地编译dist包，scp到服务器上
 scp -r dist root@47.107.82.83:/opt/www/blog
 5. 编辑nginx配置文件
@@ -97,13 +97,13 @@ nginx: configuration file /etc/nginx/nginx.conf test is successfu
   
 7. 配置完成后，地址栏输入: http://ip，即可访问
 如： http://X.X.X.X
-![nginx-ip-pic](./../../.vuepress/public/img/vuepress/nginx-ip.png)
+![nginx-ip-pic](/img/vuepress/nginx-ip.png)
 
 ## 四、域名解析
 > 每次通过http://ip方式登录，需要输入很多数字，比较麻烦。因此申请一个简易好记的域名十分重要。
 1. 此前已经申请好了域名 www.jancehu.site，通过云DNS解析，将其映射到X.X.X.X
 * 注：域名解析是指把域名指向网站空间IP
-2. 访问 [www.jacenhu.site](www.jacenhu.site)
+2. 访问 [www.jacenhu.site](http://www.jacenhu.site)
 
 ## 五、开发小知识点
 

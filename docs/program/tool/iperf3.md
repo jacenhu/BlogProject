@@ -19,11 +19,11 @@ wget https://downloads.es.net/pub/iperf/iperf-3.0.1.tar.gz
 ./configure; make; make install
 ```
 
-![iper3 compile finish](./../../.vuepress/public/img/iperf3/iperf3_compile_finish.png)
+![iper3 compile finish](/img/iperf3/iperf3_compile_finish.png)
 
 ## 3 iPerf3使用指导
 
-![iperf3 usage](./../../.vuepress/public/img/iperf3/iperf3_usage.png)
+![iperf3 usage](/img/iperf3/iperf3_usage.png)
 
 ## 4 实践
 
@@ -33,7 +33,7 @@ wget https://downloads.es.net/pub/iperf/iperf-3.0.1.tar.gz
 iperf -s
 ```
 
-![iperf3 server](./../../.vuepress/public/img/iperf3/iperf3_server.png)
+![iperf3 server](/img/iperf3/iperf3_server.png)
 
 在云服务器上启动iperf3的client端：
 
@@ -41,7 +41,7 @@ iperf -s
 iperf3 -c 127.0.0.1 -i 1 -t 10
 ```
 
-![iperf3 client](./../../.vuepress/public/img/iperf3/iperf3_client.png)
+![iperf3 client](/img/iperf3/iperf3_client.png)
 
 不同组合下的结果如下：
 

@@ -1,20 +1,20 @@
 {
   "name": "myblog",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Jacen's personal blog powered by VitePress",
+  "type": "module",
   "scripts": {
-    "dev": "vuepress dev docs",
-    "build": "vuepress build docs",
-    "docs:build": "vuepress build docs"
+    "dev": "vitepress dev docs",
+    "build": "vitepress build docs",
+    "preview": "vitepress preview docs"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "blog",
+    "vitepress"
+  ],
+  "author": "Jacen Hu",
+  "license": "MIT",
   "devDependencies": {
-    "@vuepress/plugin-active-header-links": "^1.9.7",
-    "@vuepress/plugin-back-to-top": "^1.9.7",
-    "@vuepress/plugin-nprogress": "^1.9.7",
-    "vuepress": "^1.9.7"
+    "vitepress": "^1.6.4"
   }
 }

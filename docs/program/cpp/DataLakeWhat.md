@@ -9,7 +9,7 @@
 数据湖就像一个大容器，与真实的湖泊和河流非常相似。就像在湖中有多个支流进入一样，数据湖具有结构化数据，非结构化数据，机器对机器，实时流经的日志。
 
 
-![dataLake-pic](./../../.vuepress/public/img/dataLake/dataLake.png)
+![dataLake-pic](/img/dataLake/dataLake.png)
 
 数据湖使数据更易处理，是一种经济高效的方式来存储组织的所有数据以供以后处理。数据分析师可以专注于发现数据中的有意义的模式，而不是数据本身。
 
@@ -30,7 +30,7 @@
 
 ## 数据湖的架构
 
-![dataLake-architecture-pic](./../../.vuepress/public/img/dataLake/dataLakeArchitecture.png)
+![dataLake-architecture-pic](/img/dataLake/dataLakeArchitecture.png)
 
 本图展示了一个业务数据湖的架构。较低的级别表示大多数情况下处于空闲状态的数据，而较高的级别表示实时事务数据。数据流经系统时，无延时或者几乎无延时。以下是数据湖架构中重要的层：
 
@@ -50,7 +50,7 @@
 
 以下是人们需要了解的关键的数据湖概念，以完全理解数据湖架构。
 
-![dataLake-concept-pic](./../../.vuepress/public/img/dataLake/dataLakeConcept.png)
+![dataLake-concept-pic](/img/dataLake/dataLakeConcept.png)
 
 **数据提取**
 
@@ -106,7 +106,7 @@
 
 不同教材对数据湖成熟度阶段的定义不同。虽然问题的症结仍然存在。成熟之后，阶段的定义是从外行的角度定义的。
 
-![dataLake-maturity](./../../.vuepress/public/img/dataLake/dataLakeMaturity.png)
+![dataLake-maturity](/img/dataLake/dataLakeMaturity.png)
 
 **阶段1：大规模处理和提取数据**
 

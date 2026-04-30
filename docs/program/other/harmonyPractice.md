@@ -8,7 +8,7 @@
 
 https://developer.huawei.com/consumer/cn/
 
-![hm_devSite](./../../.vuepress/public/img/hm/hm_devSite.png)
+![hm_devSite](/img/hm/hm_devSite.png)
 
 点击进一步了解，[鸿蒙OS网站](https://www.harmonyos.com/cn/home)
 
@@ -17,7 +17,7 @@ https://developer.huawei.com/consumer/cn/
 
 （1）注册华为开发者账号
 
-![hm_devAccount](./../../.vuepress/public/img/hm/hm_devAccount.png)
+![hm_devAccount](/img/hm/hm_devAccount.png)
 
 （2）下载DevEco Studio
 
@@ -25,11 +25,11 @@ https://developer.huawei.com/consumer/cn/
 
 点击立即下载：
 
-![hm_devStudio](./../../.vuepress/public/img/hm/hm_devStudio.png)
+![hm_devStudio](/img/hm/hm_devStudio.png)
 
 
 
-![hm_devStudioDownload](./../../.vuepress/public/img/hm/hm_devStudioDownload.png)
+![hm_devStudioDownload](/img/hm/hm_devStudioDownload.png)
 
 一共616MB，还是有点大的。
 
@@ -37,11 +37,11 @@ https://developer.huawei.com/consumer/cn/
 
 点击exe进行安装，一路next。
 
-![hm_devStudioInstall1](./../../.vuepress/public/img/hm/hm_devStudioInstall1.png)
+![hm_devStudioInstall1](/img/hm/hm_devStudioInstall1.png)
 
-![hm_devStudioInstall2](./../../.vuepress/public/img/hm/hm_devStudioInstall2.png)
+![hm_devStudioInstall2](/img/hm/hm_devStudioInstall2.png)
 
-![hm_devStudioInstall3](./../../.vuepress/public/img/hm/hm_devStudioInstall3.png)
+![hm_devStudioInstall3](/img/hm/hm_devStudioInstall3.png)
 
 
 
@@ -50,62 +50,62 @@ https://developer.huawei.com/consumer/cn/
 （4）配置开发环境
 
 首先，打开IDE的时候，需要下载toolchain和java sdk
-![hm_devStudioInstall4](./../../.vuepress/public/img/hm/hm_devStudioInstall4.png)
+![hm_devStudioInstall4](/img/hm/hm_devStudioInstall4.png)
 
-![hm_devStudioInstall5](./../../.vuepress/public/img/hm/hm_devStudioInstall5.png)
+![hm_devStudioInstall5](/img/hm/hm_devStudioInstall5.png)
 
 下载SDK。
 
 Configure -> Settings -> Appearance & Behavior ->  System Settings -> HarmonyOS SDK -> SDK(API Version 3)
 
-![hm_devStudioInstall6](./../../.vuepress/public/img/hm/hm_devStudioInstall6.png)
+![hm_devStudioInstall6](/img/hm/hm_devStudioInstall6.png)
 
 点击Apply就会开始下载了
 
-![hm_devStudioInstall7](./../../.vuepress/public/img/hm/hm_devStudioInstall7.png)
+![hm_devStudioInstall7](/img/hm/hm_devStudioInstall7.png)
 
 （5）第一个Harmony OS 程序： **Hello World**
 
 创建新工程，选择ability template，按照官网，我选择的是Wearable。
 
-![hm_devStudioInstall8](./../../.vuepress/public/img/hm/hm_devStudioInstall8.png)
+![hm_devStudioInstall8](/img/hm/hm_devStudioInstall8.png)
 
-![hm_devStudioInstall9](./../../.vuepress/public/img/hm/hm_devStudioInstall9.png)
+![hm_devStudioInstall9](/img/hm/hm_devStudioInstall9.png)
 
 代码目录如下：
 
-![hm_devStudioInstall10](./../../.vuepress/public/img/hm/hm_devStudioInstall10.png)
+![hm_devStudioInstall10](/img/hm/hm_devStudioInstall10.png)
 
 废了九牛二虎之力，模拟器终于下载下来。然后运行程序。
 点击Toos->HVD Manager，会转到华为开发者联盟网站。
 
-![hm_devStudioInstall12](./../../.vuepress/public/img/hm/hm_devStudioInstall12.png)
+![hm_devStudioInstall12](/img/hm/hm_devStudioInstall12.png)
 
-![hm_devStudioInstall11](./../../.vuepress/public/img/hm/hm_devStudioInstall11.png)
+![hm_devStudioInstall11](/img/hm/hm_devStudioInstall11.png)
 
 点击允许，会提示已经成功登录客户端。
 
-![hm_devStudioInstall13](./../../.vuepress/public/img/hm/hm_devStudioInstall13.png)
+![hm_devStudioInstall13](/img/hm/hm_devStudioInstall13.png)
 
 IDE页面点击Agree
 
-![hm_devStudioInstall14](./../../.vuepress/public/img/hm/hm_devStudioInstall14.png)
+![hm_devStudioInstall14](/img/hm/hm_devStudioInstall14.png)
 
 然后会弹出Device Manager，Actions中运行。
 
-![hm_devStudioInstall15](./../../.vuepress/public/img/hm/hm_devStudioInstall15.png)
+![hm_devStudioInstall15](/img/hm/hm_devStudioInstall15.png)
 
 弹出模拟器。
 
-![hm_devStudioInstall16](./../../.vuepress/public/img/hm/hm_devStudioInstall16.png)
+![hm_devStudioInstall16](/img/hm/hm_devStudioInstall16.png)
 
 Run Entry运行工程，选择Target。
 
-![hm_devStudioInstall17](./../../.vuepress/public/img/hm/hm_devStudioInstall17.png)
+![hm_devStudioInstall17](/img/hm/hm_devStudioInstall17.png)
 
 点击OK，运行完成后，手表就出现了Hello World。
 
-![hm_devStudioInstall18](./../../.vuepress/public/img/hm/hm_devStudioInstall18.png)
+![hm_devStudioInstall18](/img/hm/hm_devStudioInstall18.png)
 
 
 

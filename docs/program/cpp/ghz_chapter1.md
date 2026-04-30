@@ -12,13 +12,13 @@ step1 在https://github.com/bojand/ghz/releases下载对应环境的ghz二进制
 wget https://github.com/bojand/ghz/releases/download/v0.110.0/ghz-linux-x86_64.tar.gz
 ```
 
-![download ghz package](./../../.vuepress/public/img/grpc/wget_ghz.png)
+![download ghz package](/img/grpc/wget_ghz.png)
 
 step2 解压ghz压缩包，可得到二进制执行程序文件。
 
 解决后的目录结构如下：
 
-![unarchive ghz package](./../../.vuepress/public/img/grpc/unarchive_ghz.png)
+![unarchive ghz package](/img/grpc/unarchive_ghz.png)
 
 ## 3 ghz命令行
 
@@ -177,7 +177,7 @@ make -j8
 make install
 ```
 
-![build grpc finish](./../../.vuepress/public/img/grpc/grpc_build_finish.png)
+![build grpc finish](/img/grpc/grpc_build_finish.png)
 
 ### 4.2 简单的测试
 
@@ -223,9 +223,9 @@ make -j
 
 ```
 
-![hello world compile](./../../.vuepress/public/img/grpc/hello_world_compile.png)
+![hello world compile](/img/grpc/hello_world_compile.png)
 
-![hello world server run](./../../.vuepress/public/img/grpc/hello_world_server_run.png)
+![hello world server run](/img/grpc/hello_world_server_run.png)
 
 ##### 4.2.2.2 启动GHZ CLI客户端测试程序
 
@@ -245,7 +245,7 @@ make -j
 
 得到结果：
 
-![hello world run test result](./../../.vuepress/public/img/grpc/hello_world_run_result.png)
+![hello world run test result](/img/grpc/hello_world_run_result.png)
 
 ##### 4.2.2.3 结果解释
 
