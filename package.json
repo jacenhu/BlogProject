@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vitepress dev docs",
-    "build": "vitepress build docs",
+    "build": "vitepress build docs && node scripts/optimize-images.js",
     "preview": "vitepress preview docs"
   },
   "keywords": [
@@ -15,6 +15,7 @@
   "author": "Jacen Hu",
   "license": "MIT",
   "devDependencies": {
+    "sharp": "^0.34.5",
     "vitepress": "^1.6.4"
   }
 }

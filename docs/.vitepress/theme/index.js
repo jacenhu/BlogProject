@@ -7,6 +7,7 @@ export default {
     if (typeof window === 'undefined') return
 
     let spotlightEl = null
+    let glowEl = null
     let rafId = null
     let mouseHandler = null
     let scrollHandler = null
@@ -81,7 +82,7 @@ export default {
         })
       })
 
-      // Global mouse spotlight
+      // Global mouse spotlight — use transform on a child element for GPU compositing
       spotlightEl = document.createElement('div')
       spotlightEl.id = 'spotlight'
       spotlightEl.style.cssText = `
@@ -92,6 +93,17 @@ export default {
         opacity: 0;
         transition: opacity 0.5s;
       `
+      glowEl = document.createElement('div')
+      glowEl.style.cssText = `
+        position: absolute;
+        width: 1200px;
+        height: 1200px;
+        top: 0;
+        left: 0;
+        background: radial-gradient(circle, rgba(99,102,241,0.07) 0%, transparent 40%);
+        will-change: transform;
+      `
+      spotlightEl.appendChild(glowEl)
       document.body.appendChild(spotlightEl)
 
       let mouseX = -1000
@@ -109,8 +121,8 @@ export default {
       const animate = () => {
         currentX += (mouseX - currentX) * 0.08
         currentY += (mouseY - currentY) * 0.08
-        if (spotlightEl) {
-          spotlightEl.style.background = `radial-gradient(600px circle at ${currentX}px ${currentY}px, rgba(99,102,241,0.07), transparent 40%)`
+        if (glowEl) {
+          glowEl.style.transform = `translate(${currentX - 600}px, ${currentY - 600}px)`
         }
         rafId = requestAnimationFrame(animate)
       }
