@@ -180,6 +180,8 @@
   background: var(--vp-c-brand-soft);
   padding: 32px;
   transition: transform 0.2s ease;
+  position: relative;
+  overflow: hidden;
 }
 
 .VPFeatures .box:hover {
@@ -212,6 +214,7 @@ div[class*='language-'] {
   border-radius: 12px;
   margin: 24px 0;
   border: none;
+  position: relative;
 }
 
 /* ---------- 文档 ---------- */
@@ -236,11 +239,27 @@ div[class*='language-'] {
   color: var(--vp-c-brand-1);
   font-weight: 600;
   border-bottom: none;
+  position: relative;
+}
+
+.vp-doc a::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 50%;
+  width: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--vp-c-brand-1), #8b5cf6);
+  transition: width 0.3s ease, left 0.3s ease;
+}
+
+.vp-doc a:hover::after {
+  width: 100%;
+  left: 0;
 }
 
 .vp-doc a:hover {
-  text-decoration: underline;
-  text-underline-offset: 3px;
+  text-decoration: none;
 }
 
 /* ---------- 搜索 ---------- */
@@ -369,6 +388,93 @@ div[class*='language-'] {
 .VPFeatures .box:nth-child(3) { transition-delay: 200ms; }
 .VPFeatures .box:nth-child(4) { transition-delay: 300ms; }
 
+/* ---------- Hero Text Glow ---------- */
+.VPHero .name {
+  text-shadow: 0 0 40px rgba(99, 102, 241, 0.3);
+  animation: textGlow 3s ease-in-out infinite alternate;
+}
+
+@keyframes textGlow {
+  from {
+    text-shadow: 0 0 40px rgba(99, 102, 241, 0.3);
+  }
+  to {
+    text-shadow: 0 0 60px rgba(99, 102, 241, 0.5), 0 0 20px rgba(139, 92, 246, 0.3);
+  }
+}
+
+/* ---------- Code Block Glow ---------- */
+.vp-doc div[class*="language-"] {
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.1), 0 4px 20px rgba(99, 102, 241, 0.08);
+  transition: box-shadow 0.3s ease;
+}
+
+.vp-doc div[class*="language-"]:hover {
+  box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.2), 0 4px 30px rgba(99, 102, 241, 0.15);
+}
+
+/* ---------- Feature Card Inner Spotlight ---------- */
+.VPFeatures .box::before {
+  content: '';
+  position: absolute;
+  top: var(--mouse-y, -1000px);
+  left: var(--mouse-x, -1000px);
+  width: 250px;
+  height: 250px;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.2) 0%, transparent 70%);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s;
+  z-index: 1;
+}
+
+.VPFeatures .box:hover::before {
+  opacity: 1;
+}
+
+/* Ensure card content is above spotlight */
+.VPFeatures .box > * {
+  position: relative;
+  z-index: 2;
+}
+
+/* ---------- Reading Progress Bar ---------- */
+.reading-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  background: linear-gradient(90deg, var(--vp-c-brand-1), #8b5cf6);
+  z-index: 10000;
+  width: 0%;
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.5);
+}
+
+/* ---------- Custom Scrollbar ---------- */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--vp-c-brand-1);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--vp-c-brand-2);
+}
+
+html {
+  scrollbar-width: thin;
+  scrollbar-color: var(--vp-c-brand-1) transparent;
+}
+
 /* ---------- Reduced motion ---------- */
 @media (prefers-reduced-motion: reduce) {
   .VPHero::before {
@@ -386,5 +492,11 @@ div[class*='language-'] {
     transition: none;
     opacity: 1;
     transform: none;
+  }
+  .VPHero .name {
+    text-shadow: 0 0 40px rgba(99, 102, 241, 0.3);
+  }
+  .vp-doc a::after {
+    transition: none;
   }
 }
