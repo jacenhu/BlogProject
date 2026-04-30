@@ -5,3 +5,4 @@ dist
 __MACOSX
 docs/.vuepress/public.zip
 .claude/
+docs/.vitepress/cache
