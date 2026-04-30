@@ -14,8 +14,8 @@ hero:
 features:
   - icon: 💻
     title: 技术
-    details: 关于计算机的阅读、实践笔记，涵盖 C++、后端、LLM 与系统编程
+    details: 关于计算机的阅读、实践笔记
   - icon: 📚
     title: 阅读
-    details: 关于电影、书籍的感想，在文字中寻找生活的答案
+    details: 关于电影、书籍的感想
 ---
