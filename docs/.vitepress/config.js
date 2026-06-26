@@ -6,7 +6,7 @@ const sidebar = require('./sidebar.json')
 const nav = require('./nav.json')
 
 export default defineConfig({
-  title: "Jacen's blog",
+  title: "Jacen's Blog",
   description: 'Jacen 的个人博客，记录技术、阅读与生活灵感',
   base: '/',
   lang: 'zh-CN',
@@ -37,8 +37,7 @@ export default defineConfig({
       { icon: 'github', link: 'https://github.com/jacenhu' }
     ],
     footer: {
-      message: 'Released under the MIT License.',
-      copyright: 'Copyright © 2019-present Jacen Hu'
+      copyright: '© 2026 Jacen Hu'
     }
   }
 })

@@ -6,3 +6,4 @@ __MACOSX
 docs/.vuepress/public.zip
 .claude/
 docs/.vitepress/cache
+docs/.vitepress/.temp
