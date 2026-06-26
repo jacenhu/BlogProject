@@ -33,6 +33,10 @@
 * [Claude Code 安装](/program/llm/install_claude_code.md)
 * [Hermes Agent 安装](/program/llm/install_hermes_agent.md)
 * [OpenClaw 安装](/program/llm/install_open_claw.md)
+## 模型
+* [sglang llama 模型实现分析](/program/models/sglang_llama_model.md)
+* [基于 SGLang 部署运行 Llama 3.1 8B](/program/models/sglang_llama3.1_8b.md)
+* [sglang deepseek v2/v3 模型实现分析](/program/models/sglang_deepseekv2_model.md)
 ## 存储
 * [IO模式统计资料](/program/storage/io_stat.md)
 ## 工具

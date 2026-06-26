@@ -151,6 +151,24 @@
       ]
     },
     {
+      "text": "模型",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "sglang llama 模型实现分析",
+          "link": "/program/models/sglang_llama_model"
+        },
+        {
+          "text": "基于 SGLang 部署运行 Llama 3.1 8B",
+          "link": "/program/models/sglang_llama3.1_8b"
+        },
+        {
+          "text": "sglang deepseek v2/v3 模型实现分析",
+          "link": "/program/models/sglang_deepseekv2_model"
+        }
+      ]
+    },
+    {
       "text": "存储",
       "collapsed": true,
       "items": [
