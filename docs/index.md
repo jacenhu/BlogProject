@@ -2,8 +2,6 @@
 layout: home
 hero:
   name: Jacen's Blog
-  text: 工作、生活的灵感
-  tagline: 记录技术实践与阅读思考，探索数字世界的无限可能
   actions:
     - theme: brand
       text: 开始探索
