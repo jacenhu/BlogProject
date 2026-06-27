@@ -85,6 +85,9 @@ python -m sglang.launch_server \
 --model-path /root/autodl-tmp/models/LLM-Research/Meta-Llama-3.1-8B-Instruct \
 --host 0.0.0.0 \
 --port 30000
+
+# 模型实现的文件在：
+/root/autodl-tmp/sglangzip/sglang/python/sglang/srt/models/
 ```
 
 ## 4 验证推理服务

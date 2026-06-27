@@ -36,7 +36,8 @@
 ## 模型
 * [sglang llama 模型实现分析](/program/models/sglang_llama_model.md)
 * [基于 SGLang 部署运行 Llama 3.1 8B](/program/models/sglang_llama3.1_8b.md)
-* [sglang deepseek v2/v3 模型实现分析](/program/models/sglang_deepseekv2_model.md)
+* [sglang deepseek v4 模型实现分析](/program/models/sglang_deepseekv4_model.md)
+* [sglang glm5.2 模型实现分析](/program/models/sglang_glm5.2_model.md)
 ## 存储
 * [IO模式统计资料](/program/storage/io_stat.md)
 ## 工具

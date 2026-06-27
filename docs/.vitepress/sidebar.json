@@ -163,8 +163,12 @@
           "link": "/program/models/sglang_llama3.1_8b"
         },
         {
-          "text": "sglang deepseek v2/v3 模型实现分析",
-          "link": "/program/models/sglang_deepseekv2_model"
+          "text": "sglang deepseek v4 模型实现分析",
+          "link": "/program/models/sglang_deepseekv4_model"
+        },
+        {
+          "text": "sglang glm5.2 模型实现分析",
+          "link": "/program/models/sglang_glm5.2_model"
         }
       ]
     },
