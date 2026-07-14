@@ -42,7 +42,7 @@
 * [GLM 5.2 Attention 机制](/program/kvcache/sglang_glm52_attention_mechanism.md)
 * [KV Cache 基础知识](/program/kvcache/sglang_kvcache_knowhow.md)
 * [DeepSeek V4 KV Cache](/program/kvcache/sglang_kvcache_deeepseekv4.md)
-* [KV Cache 传输](/program/kvcache/sglang_kvcache_transfer.md)
+* [KV Cache 传输](/program/kvcache/sglang_glm52_kv_cache_transfer.md)
 ## 存储
 * [IO模式统计资料](/program/storage/io_stat.md)
 ## 工具

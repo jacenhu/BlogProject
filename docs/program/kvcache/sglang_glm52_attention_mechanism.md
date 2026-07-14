@@ -6,7 +6,7 @@
 > - [GLM 5.2 KV Cache 对接原理](sglang_glm52_kv_cache_integration.md)
 > - **GLM 5.2 Attention 机制** ← 当前文章
 > - [DeepSeek V4 KV Cache](sglang_kvcache_deeepseekv4.md)
-> - [KV Cache 传输](sglang_kvcache_transfer.md)
+> - [KV Cache 传输](sglang_glm52_kv_cache_transfer.md)
 
 ## 目录
 
