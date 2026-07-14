@@ -103,6 +103,14 @@
           "link": "/program/cpp/designPattern"
         },
         {
+          "text": "低代码/无代码运动",
+          "link": "/program/cpp/LowCodeNoCode"
+        },
+        {
+          "text": "Sharding分片技术及业界方案",
+          "link": "/program/cpp/Sharding"
+        },
+        {
           "text": "基于ghz进行gRpc框架性能压测（1）",
           "link": "/program/cpp/ghz_chapter1"
         }
@@ -223,34 +231,6 @@
         {
           "text": "网络带宽性能分析工具iPerf3",
           "link": "/program/tool/iperf3"
-        }
-      ]
-    }
-  ],
-  "/books/": [
-    {
-      "text": "书籍",
-      "collapsed": true,
-      "items": [
-        {
-          "text": "《人间失格》读后感",
-          "link": "/books/read/人间失格"
-        },
-        {
-          "text": "《断舍离》读后感",
-          "link": "/books/read/断舍离"
-        },
-        {
-          "text": "《原则》读后感",
-          "link": "/books/read/原则"
-        },
-        {
-          "text": "《AI未来》 读后感",
-          "link": "/books/read/AI未来"
-        },
-        {
-          "text": "书籍推荐及我的2021年阅读计划",
-          "link": "/books/read/书单"
         }
       ]
     }

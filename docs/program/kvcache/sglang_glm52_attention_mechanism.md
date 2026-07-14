@@ -1,4 +1,6 @@
-# GLM 5.2 Attention 机制
+# sglang GLM 5.2 Attention 机制
+
+> 首次编写：2026-07-14 | 最后更新：2026-07-14
 
 > **KV Cache 系列文章**
 > - [KV Cache 基础知识](sglang_kvcache_knowhow.md)

@@ -1,4 +1,4 @@
-# 关于计算机的阅读、实践笔记
+# 技术笔记
 ## 数据结构
 * [数据结构（C language)](/program/dataStructure/dataStructure.md)
 * [算法与数据结构总结](/program/dataStructure/AlgorithmAndDataStructure.md)
@@ -22,6 +22,9 @@
 * [《剑指offer》小结](/program/cpp/CodingInterviewSummary.md)
 * [什么是低代码](/program/cpp/lowCode.md)
 * [什么是数据湖？及其架构](/program/cpp/DataLakeWhat.md)
+* [23种设计模式（updating）](/program/cpp/designPattern.md)
+* [低代码/无代码运动](/program/cpp/LowCodeNoCode.md)
+* [Sharding分片技术及业界方案](/program/cpp/Sharding.md)
 * [基于ghz进行gRpc框架性能压测](/program/cpp/ghz_chapter1.md)
 
 ## 论文
@@ -38,9 +41,11 @@
 * [基于 SGLang 部署运行 Llama 3.1 8B](/program/models/sglang_llama3.1_8b.md)
 * [sglang deepseek v4 模型实现分析](/program/models/sglang_deepseekv4_model.md)
 * [sglang glm5.2 模型实现分析](/program/models/sglang_glm5.2_model.md)
+## KV Cache
+* [GLM 5.2 KV Cache](/program/kvcache/sglang_kvcache_glm5.2.md)
+* [KV Cache 基础知识](/program/kvcache/sglang_kvcache_knowhow.md)
 * [GLM 5.2 KV Cache 对接原理](/program/kvcache/sglang_glm52_kv_cache_integration.md)
 * [GLM 5.2 Attention 机制](/program/kvcache/sglang_glm52_attention_mechanism.md)
-* [KV Cache 基础知识](/program/kvcache/sglang_kvcache_knowhow.md)
 * [DeepSeek V4 KV Cache](/program/kvcache/sglang_kvcache_deeepseekv4.md)
 * [KV Cache 传输](/program/kvcache/sglang_glm52_kv_cache_transfer.md)
 ## 存储

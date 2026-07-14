@@ -1,4 +1,6 @@
-# GLM 5.2 KV Cache 对接原理
+# sglang GLM 5.2 KV Cache 对接原理
+
+> 首次编写：2026-07-14 | 最后更新：2026-07-14
 
 > **KV Cache 系列文章**
 > - [KV Cache 基础知识](sglang_kvcache_knowhow.md)

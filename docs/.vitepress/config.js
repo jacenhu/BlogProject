@@ -7,7 +7,7 @@ const nav = require('./nav.json')
 
 export default defineConfig({
   title: "Jacen's Blog",
-  description: 'Jacen 的个人博客，记录技术、阅读与生活灵感',
+  description: 'Jacen 的技术博客，记录计算机相关的实践笔记',
   base: '/',
   lang: 'zh-CN',
   lastUpdated: true,
