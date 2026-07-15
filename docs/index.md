@@ -27,7 +27,7 @@ hero:
   padding: 3rem 0 2rem !important;
 }
 :deep(.VPHero .container) {
-  gap: 0.75rem !important;
+  gap: 0.25rem !important;
 }
 :deep(.VPHero .tagline) {
   max-width: 480px !important;
@@ -37,7 +37,7 @@ hero:
   color: var(--vp-c-text-2) !important;
 }
 :deep(.VPHero .actions) {
-  margin-top: 1.25rem !important;
+  margin-top: 0.5rem !important;
 }
 :deep(.VPHero .actions .VPButton) {
   padding: 0.45rem 1.4rem !important;
