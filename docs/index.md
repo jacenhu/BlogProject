@@ -106,18 +106,19 @@ hero:
 }
 
 .carousel-dot {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  border: none;
-  background: var(--vp-c-bg-soft);
+  border: 1px solid var(--vp-c-text-3);
+  background: transparent;
   cursor: pointer;
   padding: 0;
-  transition: background 0.3s;
+  transition: background 0.3s, border-color 0.3s;
 }
 
 .carousel-dot.active {
   background: var(--vp-c-brand);
+  border-color: var(--vp-c-brand);
 }
 
 /* ── Mobile ── */
