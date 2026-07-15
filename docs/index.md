@@ -10,13 +10,13 @@ hero:
 
 <a href="/program/#c" class="carousel-card">
   <span class="card-icon">🖥️</span>
-  <span class="card-title">C++ & 系统</span>
+  <span class="card-title">C++ &amp; 系统</span>
   <span class="card-desc">数据结构、网络协议、分布式存储、设计模式</span>
 </a>
 
 <a href="/program/#llm" class="carousel-card">
   <span class="card-icon">🤖</span>
-  <span class="card-title">LLM & 模型</span>
+  <span class="card-title">LLM &amp; 模型</span>
   <span class="card-desc">SGLang 模型分析，Llama、DeepSeek、GLM 部署与推理</span>
 </a>
 
@@ -28,13 +28,13 @@ hero:
 
 <a href="/program/#java后端" class="carousel-card">
   <span class="card-icon">🏗️</span>
-  <span class="card-title">后端 & 架构</span>
+  <span class="card-title">后端 &amp; 架构</span>
   <span class="card-desc">SpringBoot、数据湖、分片技术、低代码实践</span>
 </a>
 
 <a href="/program/#论文" class="carousel-card">
   <span class="card-icon">📖</span>
-  <span class="card-title">论文 & 工具</span>
+  <span class="card-title">论文 &amp; 工具</span>
   <span class="card-desc">GFS 经典论文阅读、性能压测、开发环境配置</span>
 </a>
 
@@ -56,8 +56,10 @@ hero:
   max-width: 480px !important;
   margin: 0 auto !important;
   font-size: 1.15rem !important;
+  font-weight: 700 !important;
   line-height: 1.7 !important;
-  color: var(--vp-c-text-2) !important;
+  text-align: center !important;
+  color: var(--vp-c-text-1) !important;
 }
 
 /* ── Carousel ── */
