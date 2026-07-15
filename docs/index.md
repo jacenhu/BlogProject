@@ -4,13 +4,43 @@ hero:
   tagline: 记录技术学习与实践，探索系统编程、大模型推理与分布式架构
 ---
 
-<div class="home-nav">
+<div class="carousel-wrapper">
 
-<a href="/program/#c" class="nav-chip">🖥️ C++ & 系统</a>
-<a href="/program/#llm" class="nav-chip">🤖 LLM & 模型</a>
-<a href="/program/#kv-cache" class="nav-chip">⚡ KV Cache</a>
-<a href="/program/#java后端" class="nav-chip">🏗️ 后端 & 实践</a>
-<a href="/program/#论文" class="nav-chip">📖 论文 & 工具</a>
+<div class="carousel-track" id="carousel-track">
+
+<a href="/program/#c" class="carousel-card">
+  <span class="card-icon">🖥️</span>
+  <span class="card-title">C++ & 系统</span>
+  <span class="card-desc">数据结构、网络协议、分布式存储、设计模式</span>
+</a>
+
+<a href="/program/#llm" class="carousel-card">
+  <span class="card-icon">🤖</span>
+  <span class="card-title">LLM & 模型</span>
+  <span class="card-desc">SGLang 模型分析，Llama、DeepSeek、GLM 部署与推理</span>
+</a>
+
+<a href="/program/#kv-cache" class="carousel-card">
+  <span class="card-icon">⚡</span>
+  <span class="card-title">KV Cache</span>
+  <span class="card-desc">GLM 5.2 KV Cache 机制、Attention、传输与集成</span>
+</a>
+
+<a href="/program/#java后端" class="carousel-card">
+  <span class="card-icon">🏗️</span>
+  <span class="card-title">后端 & 架构</span>
+  <span class="card-desc">SpringBoot、数据湖、分片技术、低代码实践</span>
+</a>
+
+<a href="/program/#论文" class="carousel-card">
+  <span class="card-icon">📖</span>
+  <span class="card-title">论文 & 工具</span>
+  <span class="card-desc">GFS 经典论文阅读、性能压测、开发环境配置</span>
+</a>
+
+</div>
+
+<div class="carousel-dots" id="carousel-dots"></div>
 
 </div>
 
@@ -29,35 +59,154 @@ hero:
   line-height: 1.7 !important;
   color: var(--vp-c-text-2) !important;
 }
-/* ── 分类导航 ── */
-.home-nav {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.5rem;
-  max-width: 640px;
+
+/* ── Carousel ── */
+.carousel-wrapper {
+  max-width: 720px;
   margin: 0 auto;
   padding: 0 1rem 2rem;
+  overflow: hidden;
 }
 
-.nav-chip {
-  display: inline-flex;
+.carousel-track {
+  display: flex;
+  transition: transform 0.5s ease;
+}
+
+.carousel-card {
+  flex: 0 0 calc(100% / 3);
+  min-width: calc(100% / 3);
+  display: flex;
+  flex-direction: column;
   align-items: center;
-  gap: 0.35rem;
-  padding: 0.4rem 0.9rem;
-  border-radius: 20px;
-  font-size: 0.82rem;
-  font-weight: 500;
-  color: var(--vp-c-text-1);
+  text-align: center;
+  padding: 1.5rem 1rem;
+  border-radius: 12px;
+  border: 1px solid var(--vp-c-bg-soft);
   background: var(--vp-c-bg-soft);
-  border: 1px solid transparent;
-  transition: border-color 0.2s, background 0.2s;
   text-decoration: none !important;
-  white-space: nowrap;
+  transition: border-color 0.25s, background 0.25s;
+  box-sizing: border-box;
 }
 
-.nav-chip:hover {
+.carousel-card:hover {
   border-color: var(--vp-c-brand);
   background: var(--vp-c-bg);
 }
+
+.card-icon {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+}
+
+.card-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--vp-c-text-1);
+  margin-bottom: 0.3rem;
+}
+
+.card-desc {
+  font-size: 0.8rem;
+  color: var(--vp-c-text-2);
+  line-height: 1.5;
+}
+
+/* ── Dots ── */
+.carousel-dots {
+  display: flex;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.carousel-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: none;
+  background: var(--vp-c-bg-soft);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.3s;
+}
+
+.carousel-dot.active {
+  background: var(--vp-c-brand);
+}
+
+/* ── Mobile ── */
+@media (max-width: 640px) {
+  .carousel-card {
+    flex: 0 0 100%;
+    min-width: 100%;
+  }
+}
 </style>
+
+<script>
+(function() {
+  const track = document.getElementById('carousel-track');
+  const dotsContainer = document.getElementById('carousel-dots');
+  const cards = track.querySelectorAll('.carousel-card');
+  const total = cards.length;
+
+  // Determine visible count based on screen width
+  function visibleCount() {
+    return window.innerWidth <= 640 ? 1 : 3;
+  }
+
+  let current = 0;
+  let timer = null;
+
+  function renderDots() {
+    const vis = visibleCount();
+    const dotCount = total - vis + 1;
+    dotsContainer.innerHTML = '';
+    for (let i = 0; i < dotCount; i++) {
+      const dot = document.createElement('button');
+      dot.className = 'carousel-dot' + (i === current ? ' active' : '');
+      dot.setAttribute('aria-label', '第' + (i + 1) + '组');
+      dot.addEventListener('click', () => goTo(i));
+      dotsContainer.appendChild(dot);
+    }
+  }
+
+  function goTo(index) {
+    const vis = visibleCount();
+    const max = total - vis;
+    if (index < 0) index = max;
+    if (index > max) index = 0;
+    current = index;
+    const percent = -(current * (100 / vis));
+    track.style.transform = 'translateX(' + percent + '%)';
+    renderDots();
+  }
+
+  function next() {
+    const vis = visibleCount();
+    const max = total - vis;
+    if (current >= max) {
+      goTo(0);
+    } else {
+      goTo(current + 1);
+    }
+  }
+
+  function startAuto() {
+    stopAuto();
+    timer = setInterval(next, 3500);
+  }
+
+  function stopAuto() {
+    if (timer) { clearInterval(timer); timer = null; }
+  }
+
+  renderDots();
+  startAuto();
+
+  track.parentElement.addEventListener('mouseenter', stopAuto);
+  track.parentElement.addEventListener('mouseleave', startAuto);
+  window.addEventListener('resize', () => { renderDots(); goTo(0); });
+})();
+</script>
