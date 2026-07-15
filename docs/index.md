@@ -45,26 +45,6 @@ hero:
 </div>
 
 <style>
-/* ── Hero ── */
-:deep(.VPHero) {
-  display: flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  padding: 3rem 0 2rem !important;
-}
-:deep(.VPHero .container) {
-  gap: 0.25rem !important;
-}
-:deep(.VPHero .tagline) {
-  max-width: 480px !important;
-  margin: 0 auto !important;
-  font-size: 1.15rem !important;
-  font-weight: 700 !important;
-  line-height: 1.7 !important;
-  text-align: center !important;
-  color: #1a1a1a !important;
-}
-
 /* ── Carousel ── */
 .carousel-wrapper {
   max-width: 720px;
