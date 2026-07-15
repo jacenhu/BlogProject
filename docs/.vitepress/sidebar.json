@@ -189,7 +189,7 @@
           "link": "/program/kvcache/sglang_kvcache_knowhow"
         },
         {
-          "text": "GLM 5.2 KV Cache",
+          "text": "深度解析 SGLang × GLM-5.2 KV Cache",
           "link": "/program/kvcache/sglang_kvcache_glm5.2"
         },
         {
@@ -201,12 +201,12 @@
           "link": "/program/kvcache/sglang_glm52_attention_mechanism"
         },
         {
-          "text": "DeepSeek V4 KV Cache",
-          "link": "/program/kvcache/sglang_kvcache_deeepseekv4"
+          "text": "GLM 5.2 KV Cache 传输",
+          "link": "/program/kvcache/sglang_glm52_kv_cache_transfer"
         },
         {
-          "text": "KV Cache 传输",
-          "link": "/program/kvcache/sglang_glm52_kv_cache_transfer"
+          "text": "DeepSeek V4 KV Cache",
+          "link": "/program/kvcache/sglang_kvcache_deeepseekv4"
         }
       ]
     },
