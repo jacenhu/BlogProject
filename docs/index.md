@@ -1,7 +1,6 @@
 ---
 layout: home
 hero:
-  name: Jacen's Blog
   tagline: 记录技术学习与实践，探索系统编程、大模型推理与分布式架构
   actions:
     - theme: brand
@@ -57,9 +56,6 @@ hero:
 }
 :deep(.VPHero .container) {
   gap: 0.5rem !important;
-}
-:deep(.VPHero .name) {
-  display: none !important;
 }
 :deep(.VPHero .tagline) {
   font-size: 1.05rem !important;
