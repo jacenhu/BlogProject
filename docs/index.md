@@ -47,7 +47,11 @@ hero:
 <style>
 /* ── Hero ── */
 :deep(.VPHero) {
-  padding: 3rem 0 2rem !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-height: calc(100vh - 64px) !important;
+  padding: 2rem 0 !important;
 }
 :deep(.VPHero .container) {
   gap: 0.25rem !important;
@@ -59,7 +63,7 @@ hero:
   font-weight: 700 !important;
   line-height: 1.7 !important;
   text-align: center !important;
-  color: var(--vp-c-text-1) !important;
+  color: #1a1a1a !important;
 }
 
 /* ── Carousel ── */
