@@ -144,10 +144,13 @@ hero:
 }
 </style>
 
-<script>
-(function() {
+<script setup>
+import { onMounted } from 'vue'
+
+onMounted(() => {
   const track = document.getElementById('carousel-track');
   const dotsContainer = document.getElementById('carousel-dots');
+  if (!track || !dotsContainer) return;
   const cards = track.querySelectorAll('.carousel-card');
   const total = cards.length;
 
@@ -208,5 +211,5 @@ hero:
   track.parentElement.addEventListener('mouseenter', stopAuto);
   track.parentElement.addEventListener('mouseleave', startAuto);
   window.addEventListener('resize', () => { renderDots(); goTo(0); });
-})();
+});
 </script>
