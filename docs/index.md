@@ -12,12 +12,6 @@ hero:
       link: https://github.com/jacenhu
 ---
 
-<div class="home-intro">
-
-欢迎。这里是我在工作与学习中积累的技术笔记，涵盖系统编程、大模型推理、分布式存储等方向。
-
-</div>
-
 <div class="home-categories">
 
 <div class="category-grid">
