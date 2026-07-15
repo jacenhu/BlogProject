@@ -4,8 +4,13 @@ hero:
   tagline: 系统编程、大模型推理与分布式架构
 ---
 
-<div class="carousel-wrapper">
+<div class="carousel-wrapper" id="carousel-wrapper">
 
+<div class="carousel-row">
+
+<button class="carousel-arrow carousel-arrow-left" id="carousel-prev" aria-label="上一组">‹</button>
+
+<div class="carousel-viewport">
 <div class="carousel-track" id="carousel-track">
 
 <a href="/program/#c" class="carousel-card">
@@ -40,6 +45,12 @@ hero:
 
 </div>
 
+</div>
+
+<button class="carousel-arrow carousel-arrow-right" id="carousel-next" aria-label="下一组">›</button>
+
+</div>
+
 <div class="carousel-dots" id="carousel-dots"></div>
 
 </div>
@@ -47,10 +58,44 @@ hero:
 <style>
 /* ── Carousel ── */
 .carousel-wrapper {
-  max-width: 720px;
+  max-width: 780px;
   margin: 0 auto;
   padding: 0 1rem 2rem;
+}
+
+.carousel-row {
+  display: flex;
+  align-items: center;
+}
+
+.carousel-viewport {
+  flex: 1;
   overflow: hidden;
+}
+
+/* ── Arrows ── */
+.carousel-arrow {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid var(--vp-c-text-3);
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-1);
+  font-size: 1.2rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.2s, background 0.2s;
+  line-height: 1;
+  padding: 0;
+  margin: 0 0.15rem;
+}
+
+.carousel-arrow:hover {
+  border-color: var(--vp-c-brand);
+  background: var(--vp-c-bg-soft);
 }
 
 .carousel-track {
@@ -191,11 +236,19 @@ onMounted(() => {
     if (timer) { clearInterval(timer); timer = null; }
   }
 
+  function prev() {
+    goTo(current - 1);
+  }
+
   renderDots();
   startAuto();
 
-  track.parentElement.addEventListener('mouseenter', stopAuto);
-  track.parentElement.addEventListener('mouseleave', startAuto);
+  document.getElementById('carousel-prev').addEventListener('click', prev);
+  document.getElementById('carousel-next').addEventListener('click', next);
+
+  const wrapper = document.getElementById('carousel-wrapper');
+  wrapper.addEventListener('mouseenter', stopAuto);
+  wrapper.addEventListener('mouseleave', startAuto);
   window.addEventListener('resize', () => { renderDots(); goTo(0); });
 });
 </script>
