@@ -58,7 +58,7 @@ ReqToTokenPool 【本文主角：请求→Token逻辑映射层】
 TokenPool / RadixCache / KV Cache 【GPU显存物理存储层】
 ```
 
-** 数据结构 **
+**数据结构**:
 ```python
 class ReqToTokenPool:
     # 全局固定配置：整个推理引擎最大支持多少个并行请求
@@ -97,6 +97,20 @@ class ReqToTokenPool:
     # 主要用于前缀树缓存 RadixCache 命中、KV 复用、请求拷贝、回滚撤销。
     token_to_req: Dict[int, Tuple[int, int]]
 ```
+
+**容易混淆的概念区分（避坑）**：
+1. ReqToTokenPool VS TokenPool
+- **ReqToTokenPool：逻辑索引层**，只存 ID 映射，不管理显存内存，属于 CPU 侧调度结构；
+- **TokenPool：物理显存管理层**，负责 GPU 显存块分配、释放、碎片整理、地址管理，真正持有 KV Cache 内存。
+2. req 内 pos VS 全局 gid
+- `pos`：**请求私有局部下标**，只属于这一条请求，从 0 开始递增；
+- `gid`：**全局全局唯一下标**，整个推理引擎所有请求共用一套编号，直接对应显存数组下标。
+
+**极简总结**：
+1. 本质：**一张二维对照表，把单条请求内部 Token 序号翻译成全局 KV 显存地址编号**；
+2. Prefill 批量填表，Decode 逐行追加，结束整张表清空回收；
+3. 不上手管显存，只做路由索引，是 Batch 调度与 KV 显存池的解耦中间层；
+4. 前缀缓存复用 KV 的核心载体就是复用已有全局 gid，直接挂载进映射表。
 
 - 1.2.2 `TokenToKVPoolAllocator`：Token 映射物理显存池（物理层）
 - 1.2.3 双层解耦优势：逻辑请求自由伸缩、物理显存统一池化
