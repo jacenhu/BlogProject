@@ -50,8 +50,7 @@ hero:
   display: flex !important;
   align-items: center !important;
   justify-content: center !important;
-  min-height: calc(100vh - 64px) !important;
-  padding: 2rem 0 !important;
+  padding: 3rem 0 2rem !important;
 }
 :deep(.VPHero .container) {
   gap: 0.25rem !important;
