@@ -2,13 +2,6 @@
 layout: home
 hero:
   tagline: 记录技术学习与实践，探索系统编程、大模型推理与分布式架构
-  actions:
-    - theme: brand
-      text: 浏览文章
-      link: /program/
-    - theme: alt
-      text: GitHub
-      link: https://github.com/jacenhu
 ---
 
 <div class="home-nav">
@@ -36,15 +29,6 @@ hero:
   line-height: 1.7 !important;
   color: var(--vp-c-text-2) !important;
 }
-:deep(.VPHero .actions) {
-  margin-top: 0.5rem !important;
-}
-:deep(.VPHero .actions .VPButton) {
-  padding: 0.45rem 1.4rem !important;
-  font-size: 0.88rem !important;
-  border-radius: 20px !important;
-}
-
 /* ── 分类导航 ── */
 .home-nav {
   display: flex;
