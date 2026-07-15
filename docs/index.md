@@ -65,7 +65,7 @@ hero:
   gap: 0.5rem !important;
 }
 :deep(.VPHero .name) {
-  font-size: 2.5rem !important;
+  display: none !important;
 }
 :deep(.VPHero .tagline) {
   font-size: 1.05rem !important;
