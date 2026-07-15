@@ -11,116 +11,69 @@ hero:
       link: https://github.com/jacenhu
 ---
 
-<div class="home-categories">
+<div class="home-nav">
 
-<div class="category-grid">
-
-<a href="/program/#c" class="category-card">
-  <span class="category-icon">🖥️</span>
-  <span class="category-title">C++ & 系统</span>
-  <span class="category-desc">数据结构、网络协议、分布式存储</span>
-</a>
-
-<a href="/program/#llm" class="category-card">
-  <span class="category-icon">🤖</span>
-  <span class="category-title">LLM & 模型</span>
-  <span class="category-desc">SGLang、Llama、DeepSeek、GLM 模型分析</span>
-</a>
-
-<a href="/program/#kv-cache" class="category-card">
-  <span class="category-icon">⚡</span>
-  <span class="category-title">KV Cache</span>
-  <span class="category-desc">GLM 5.2 KV Cache 机制与传输</span>
-</a>
-
-<a href="/program/#java后端" class="category-card">
-  <span class="category-icon">🏗️</span>
-  <span class="category-title">后端 & 实践</span>
-  <span class="category-desc">SpringBoot、数据湖、开发环境</span>
-</a>
-
-<a href="/program/#论文" class="category-card">
-  <span class="category-icon">📖</span>
-  <span class="category-title">论文 & 工具</span>
-  <span class="category-desc">GFS 论文阅读、性能压测实践</span>
-</a>
-
-</div>
+<a href="/program/#c" class="nav-chip">🖥️ C++ & 系统</a>
+<a href="/program/#llm" class="nav-chip">🤖 LLM & 模型</a>
+<a href="/program/#kv-cache" class="nav-chip">⚡ KV Cache</a>
+<a href="/program/#java后端" class="nav-chip">🏗️ 后端 & 实践</a>
+<a href="/program/#论文" class="nav-chip">📖 论文 & 工具</a>
 
 </div>
 
 <style>
-/* ── 压缩 Hero 区域，让卡片尽量不滚动即见 ── */
+/* ── Hero ── */
 :deep(.VPHero) {
-  padding: 2rem 0 1.5rem !important;
+  padding: 3rem 0 2rem !important;
 }
 :deep(.VPHero .container) {
-  gap: 0.5rem !important;
+  gap: 0.75rem !important;
 }
 :deep(.VPHero .tagline) {
-  font-size: 1.05rem !important;
-  margin-top: 0.25rem !important;
+  max-width: 480px !important;
+  margin: 0 auto !important;
+  font-size: 1.15rem !important;
+  line-height: 1.7 !important;
+  color: var(--vp-c-text-2) !important;
 }
 :deep(.VPHero .actions) {
-  margin-top: 1rem !important;
+  margin-top: 1.25rem !important;
 }
 :deep(.VPHero .actions .VPButton) {
-  padding: 0.4rem 1.2rem !important;
-  font-size: 0.85rem !important;
+  padding: 0.45rem 1.4rem !important;
+  font-size: 0.88rem !important;
   border-radius: 20px !important;
 }
 
-.home-categories {
-  max-width: 800px;
-  margin: 1.5rem auto 0;
-  padding: 0 1rem;
-}
-
-.category-grid {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 0.75rem;
-}
-
-@media (max-width: 768px) {
-  .category-grid {
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  }
-}
-
-.category-card {
+/* ── 分类导航 ── */
+.home-nav {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 1rem 0.75rem;
-  border-radius: 10px;
-  border: 1px solid var(--vp-c-bg-soft);
-  background: var(--vp-c-bg-soft);
-  transition: border-color 0.25s, background 0.25s;
-  text-decoration: none !important;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 0 1rem 2rem;
 }
 
-.category-card:hover {
+.nav-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.9rem;
+  border-radius: 20px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--vp-c-text-1);
+  background: var(--vp-c-bg-soft);
+  border: 1px solid transparent;
+  transition: border-color 0.2s, background 0.2s;
+  text-decoration: none !important;
+  white-space: nowrap;
+}
+
+.nav-chip:hover {
   border-color: var(--vp-c-brand);
   background: var(--vp-c-bg);
-}
-
-.category-icon {
-  font-size: 1.5rem;
-  margin-bottom: 0.3rem;
-}
-
-.category-title {
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: var(--vp-c-text-1);
-  margin-bottom: 0.15rem;
-}
-
-.category-desc {
-  font-size: 0.75rem;
-  color: var(--vp-c-text-2);
-  line-height: 1.4;
 }
 </style>
