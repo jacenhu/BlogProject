@@ -74,6 +74,11 @@ hero:
 :deep(.VPHero .actions) {
   margin-top: 1rem !important;
 }
+:deep(.VPHero .actions .VPButton) {
+  padding: 0.4rem 1.2rem !important;
+  font-size: 0.85rem !important;
+  border-radius: 20px !important;
+}
 
 .home-intro {
   max-width: 600px;
