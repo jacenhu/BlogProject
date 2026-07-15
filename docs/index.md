@@ -58,20 +58,20 @@ hero:
 
 <style>
 /* ── 压缩 Hero 区域，让卡片尽量不滚动即见 ── */
-.VPHero {
+:deep(.VPHero) {
   padding: 2rem 0 1.5rem !important;
 }
-.VPHero .container {
+:deep(.VPHero .container) {
   gap: 0.5rem !important;
 }
-.VPHero .name {
+:deep(.VPHero .name) {
   font-size: 2.5rem !important;
 }
-.VPHero .tagline {
+:deep(.VPHero .tagline) {
   font-size: 1.05rem !important;
   margin-top: 0.25rem !important;
 }
-.VPHero .actions {
+:deep(.VPHero .actions) {
   margin-top: 1rem !important;
 }
 
