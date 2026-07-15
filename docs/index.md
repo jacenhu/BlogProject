@@ -74,16 +74,6 @@ hero:
   border-radius: 20px !important;
 }
 
-.home-intro {
-  max-width: 600px;
-  margin: 0 auto;
-  text-align: center;
-  color: var(--vp-c-text-2);
-  font-size: 1rem;
-  line-height: 1.6;
-  padding: 0 1rem;
-}
-
 .home-categories {
   max-width: 800px;
   margin: 1.5rem auto 0;
