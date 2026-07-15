@@ -57,26 +57,50 @@ hero:
 </div>
 
 <style>
+/* ── 压缩 Hero 区域，让卡片尽量不滚动即见 ── */
+.VPHero {
+  padding: 2rem 0 1.5rem !important;
+}
+.VPHero .container {
+  gap: 0.5rem !important;
+}
+.VPHero .name {
+  font-size: 2.5rem !important;
+}
+.VPHero .tagline {
+  font-size: 1.05rem !important;
+  margin-top: 0.25rem !important;
+}
+.VPHero .actions {
+  margin-top: 1rem !important;
+}
+
 .home-intro {
   max-width: 600px;
   margin: 0 auto;
   text-align: center;
   color: var(--vp-c-text-2);
-  font-size: 1.05rem;
-  line-height: 1.7;
+  font-size: 1rem;
+  line-height: 1.6;
   padding: 0 1rem;
 }
 
 .home-categories {
   max-width: 800px;
-  margin: 2.5rem auto 0;
+  margin: 1.5rem auto 0;
   padding: 0 1rem;
 }
 
 .category-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.75rem;
+}
+
+@media (max-width: 768px) {
+  .category-grid {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
 }
 
 .category-card {
@@ -84,8 +108,8 @@ hero:
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 1.5rem 1rem;
-  border-radius: 12px;
+  padding: 1rem 0.75rem;
+  border-radius: 10px;
   border: 1px solid var(--vp-c-bg-soft);
   background: var(--vp-c-bg-soft);
   transition: border-color 0.25s, background 0.25s;
@@ -98,20 +122,20 @@ hero:
 }
 
 .category-icon {
-  font-size: 2rem;
-  margin-bottom: 0.5rem;
+  font-size: 1.5rem;
+  margin-bottom: 0.3rem;
 }
 
 .category-title {
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   font-weight: 600;
   color: var(--vp-c-text-1);
-  margin-bottom: 0.25rem;
+  margin-bottom: 0.15rem;
 }
 
 .category-desc {
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   color: var(--vp-c-text-2);
-  line-height: 1.5;
+  line-height: 1.4;
 }
 </style>
