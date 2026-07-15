@@ -13,11 +13,91 @@ GLM-5.2 凭借 **DSA 稠密稀疏交替注意力、MLA 低秩压缩 KV、MoE 混
 ## 第1章 SGLang KV Cache 底层数据结构与内存池机制
 ### 1.1 传统 KV Cache 架构缺陷（PyTorch 原生连续缓存）
 - 1.1.1 四维张量排布：`[batch, seq_len, n_head, head_dim]` 存储范式
+
+四维张量 [batch, seq_len, n_head, head_dim] 是 Transformer 架构（如多头注意力机制）中处理 Q、K、V 及最终输出时的核心逻辑排布。这种排布旨在将序列数据映射到不同的子空间，实现多角度特征的并行捕捉。
+
+维度详解与物理意义:
+batch (批次大小 / 序列条数)：表示一次并行处理的独立样本数量。
+seq_len (序列长度)：单个样本包含的 Token 数量或时间步数。
+n_head (注意力头数)：模型并行的注意力子空间数量。
+总特征维度通常由 (n_head * head_dim) 决定。
+head_dim (单头维度)：每个注意力头负责提取的特征向量长度。
+
+在代码中的流转过程（PyTorch 为例）
+在多头注意力机制（Multi-Head Attention）内部，数据排布需经过多次变换以满足计算要求：
+线性投影：通常输入的特征维度为 [batch, seq_len, embed_dim]。经过投影层展开为 Q、K、V 后，形状仍保持为 [batch, seq_len, embed_dim]。拆分与重塑 (view)：将最后一个维度 embed_dim 拆分为 n_head 和 head_dim，张量变为四维：[batch, seq_len, n_head, head_dim]。转置与排列 (transpose 或 permute)：为了能对每个头进行点积注意力计算，需要将 seq_len 和 n_head 维度进行交换，变成 [batch, n_head, seq_len, head_dim]。这样计算时，能保证每个 head 独立处理序列信息。
+
+参考： https://medium.com/@kavierim/transformers-from-scratch-part-3-multi-head-attention-d1a3a061ba89
+
+
 - 1.1.2 固定连续内存导致：显存碎片化严重、无法局部复用、长序列 OOM
 - 1.1.3 批量推理无法共享公共 Prompt，Prefill 算力严重浪费
 
 ### 1.2 SGLang 双层内存池架构核心设计
-- 1.2.1 `ReqToTokenPool`：请求级逻辑映射池（逻辑层）
+#### 1.2.1 `ReqToTokenPool`：请求级逻辑映射池（逻辑层）
+**定位**：
+
+推理逻辑层核心映射组件，介于「上层用户 Prompt 请求」和「底层 KV Cache 显存 Token 池」中间，**只做逻辑索引绑定，不管理显存、不存真实 KV 数据**。
+
+**ReqToTokenPool 核心职责**：
+
+1. 给**单个请求（Req）** 分配一批「逻辑 Token 槽位 ID」
+2. 维护「请求内第 i 个 Token」→「全局 Token 池里的绝对索引」的映射表
+3. Prefill 阶段批量绑定一大片映射；Decode 阶段每次追加 1 条映射
+4. 请求结束 / 回滚时，回收映射条目，标记对应 Token 位置可复用
+5. 隔离请求维度逻辑与 GPU 显存物理地址，上层调度只改映射，不用碰显存指针
+
+**层级关系**：
+``` plain text
+前端请求（Prompt + 生成参数）
+    ↓
+BatchScheduler 批量调度器（把多个请求打包成batch）
+    ↓
+ReqToTokenPool 【本文主角：请求→Token逻辑映射层】
+    ↓
+TokenPool / RadixCache / KV Cache 【GPU显存物理存储层】
+```
+
+** 数据结构 **
+```python
+class ReqToTokenPool:
+    # 全局固定配置：整个推理引擎最大支持多少个并行请求
+    # 引擎全局最大并发请求数，比如设为 256，代表同一批次最多同时跑 256 条用户 query。
+    max_reqs: int
+    # 全局固定配置：单条请求最多能占用多少个Token位置（上下文窗口上限）
+    # 单请求最大上下文，比如 8192，单条 prompt + 生成文本总 Token 不能超这个值，防止单请求占满整个显存池。
+    max_ctx_len_per_req: int
+
+    """
+    核心二维映射表：req_idx -> token_pos_in_req -> global_token_pool_idx
+    shape: [max_reqs, max_ctx_len_per_req]
+    举例：req_to_token[2][5] = 1024，第 3 条请求，它自己上下文里第 6 个 Token，存放在全局 KV 池第 1024 号槽位。
+    - 第一维下标：`rid` = Request ID，批次内请求编号
+    - 第二维下标：`pos` = 该请求内部第几个 Token（0 是第一个 Prompt Token）
+    - 存储值：`gid` = Global Token ID，**底层 KV Token 池里的唯一全局索引**
+    """
+    req_to_token: List[List[int]]
+
+    """
+    # 每个请求当前已经占用了多少个Token（当前上下文长度）
+    # req_ctx_len[rid] = 该请求已映射Token数量
+    记录该请求已经映射绑定了多少个全局 Token。
+    Prefill 前初始为 0；Prefill 后直接赋值为 Prompt Token 长度；每 Decode 一轮 +1。
+    边界：`req_ctx_len[rid] < max_ctx_len_per_req`，溢出直接截断 / 报错。
+    """
+    req_ctx_len: List[int]
+
+    # 标记该请求是否处于激活可推理状态
+    # True：请求正在批次中正常推理；
+    # False：请求结束、被驱逐、出错，映射可清空回收。
+    req_active: List[bool]
+
+    # 反向辅助映射（可选）：全局TokenID 反向查属于哪个请求+请求内偏移
+    # 输入全局 gid，输出`(rid, pos)`，快速定位这个 KV 片段属于哪个请求、该请求内第几个 Token。
+    # 主要用于前缀树缓存 RadixCache 命中、KV 复用、请求拷贝、回滚撤销。
+    token_to_req: Dict[int, Tuple[int, int]]
+```
+
 - 1.2.2 `TokenToKVPoolAllocator`：Token 映射物理显存池（物理层）
 - 1.2.3 双层解耦优势：逻辑请求自由伸缩、物理显存统一池化
 
@@ -267,7 +347,18 @@ TTFT、TPOT、QPS、显存占用、内存开销、缓存命中率、PCIe/网络�
 ### 13.2 未来方向：Chunked Prefill、分布式全局KV缓存集群、RDMA零拷贝跨机传输、自适应智能分级传输调度
 
 ## 14 附录
-### 14.1 PagedAttention
+### 14.1 传统原版 PagedAttention
+
+论文：*Efficient Memory Management for Large Language Model Serving with PagedAttention*（arXiv:2309.06180）
+
+传统原版 PagedAttention = 把 LLM 推理的 KV 缓存做成操作系统虚拟内存分页系统，用离散固定大小显存块 + 页表映射替代整块连续内存预分配，根治 KV 缓存显存碎片化，大幅提升大模型在线服务并发吞吐量。
+
+### 14.2 GPU Warp
+在 NVIDIA 的 GPU 架构中，线程并不是完全独立执行的，而是被分组管理的。
+Warp 是 GPU 调度和执行的基本单位。
+一个 Warp 通常包含 32 个线程（在 NVIDIA GPU 中）。
+SIMT 模型：这 32 个线程会同时执行完全相同的指令。这被称为“单指令多线程”。
+SIMT 全称是 Single Instruction, Multiple Threads（单指令，多线程）
 
 ## 增补说明
 1. 单独拆分**第7章 KV Cache跨设备传输专项章节**，把同主机GPU-CPU、多卡NCCL通信、CPU-磁盘落盘加载、分布式集群拉取推送、传输队列/优先级/容错/GLM适配全部完整补全；
