@@ -35,82 +35,232 @@ head_dim (单头维度)：每个注意力头负责提取的特征向量长度。
 
 ### 1.2 SGLang 双层内存池架构核心设计
 #### 1.2.1 `ReqToTokenPool`：请求级逻辑映射池（逻辑层）
+
 **定位**：
 
-推理逻辑层核心映射组件，介于「上层用户 Prompt 请求」和「底层 KV Cache 显存 Token 池」中间，**只做逻辑索引绑定，不管理显存、不存真实 KV 数据**。
+SGLang 内存池体系分为三层，`ReqToTokenPool` 是**逻辑层**——只做请求到 token 位置的索引映射，不管物理显存：
 
-**ReqToTokenPool 核心职责**：
-
-1. 给**单个请求（Req）** 分配一批「逻辑 Token 槽位 ID」
-2. 维护「请求内第 i 个 Token」→「全局 Token 池里的绝对索引」的映射表
-3. Prefill 阶段批量绑定一大片映射；Decode 阶段每次追加 1 条映射
-4. 请求结束 / 回滚时，回收映射条目，标记对应 Token 位置可复用
-5. 隔离请求维度逻辑与 GPU 显存物理地址，上层调度只改映射，不用碰显存指针
-
-**层级关系**：
-``` plain text
-前端请求（Prompt + 生成参数）
-    ↓
-BatchScheduler 批量调度器（把多个请求打包成batch）
-    ↓
-ReqToTokenPool 【本文主角：请求→Token逻辑映射层】
-    ↓
-TokenPool / RadixCache / KV Cache 【GPU显存物理存储层】
+```
+ReqToTokenPool           ← 逻辑层：请求 → token 位置映射（本类）
+TokenToKVPoolAllocator   ← 分配层：物理 slot 的分配/释放/碎片整理
+KVCache                  ← 物理层：GPU 上真实的 K/V 张量
 ```
 
-**数据结构**:
+源码位于 `python/sglang/srt/mem_cache/memory_pool.py:235-302`，总共不到 70 行。
+
+---
+
+**核心数据结构**：
+
 ```python
 class ReqToTokenPool:
-    # 全局固定配置：整个推理引擎最大支持多少个并行请求
-    # 引擎全局最大并发请求数，比如设为 256，代表同一批次最多同时跑 256 条用户 query。
-    max_reqs: int
-    # 全局固定配置：单条请求最多能占用多少个Token位置（上下文窗口上限）
-    # 单请求最大上下文，比如 8192，单条 prompt + 生成文本总 Token 不能超这个值，防止单请求占满整个显存池。
-    max_ctx_len_per_req: int
+    """A memory pool that maps a request to its token locations."""
 
-    """
-    核心二维映射表：req_idx -> token_pos_in_req -> global_token_pool_idx
-    shape: [max_reqs, max_ctx_len_per_req]
-    举例：req_to_token[2][5] = 1024，第 3 条请求，它自己上下文里第 6 个 Token，存放在全局 KV 池第 1024 号槽位。
-    - 第一维下标：`rid` = Request ID，批次内请求编号
-    - 第二维下标：`pos` = 该请求内部第几个 Token（0 是第一个 Prompt Token）
-    - 存储值：`gid` = Global Token ID，**底层 KV Token 池里的唯一全局索引**
-    """
-    req_to_token: List[List[int]]
-
-    """
-    # 每个请求当前已经占用了多少个Token（当前上下文长度）
-    # req_ctx_len[rid] = 该请求已映射Token数量
-    记录该请求已经映射绑定了多少个全局 Token。
-    Prefill 前初始为 0；Prefill 后直接赋值为 Prompt Token 长度；每 Decode 一轮 +1。
-    边界：`req_ctx_len[rid] < max_ctx_len_per_req`，溢出直接截断 / 报错。
-    """
-    req_ctx_len: List[int]
-
-    # 标记该请求是否处于激活可推理状态
-    # True：请求正在批次中正常推理；
-    # False：请求结束、被驱逐、出错，映射可清空回收。
-    req_active: List[bool]
-
-    # 反向辅助映射（可选）：全局TokenID 反向查属于哪个请求+请求内偏移
-    # 输入全局 gid，输出`(rid, pos)`，快速定位这个 KV 片段属于哪个请求、该请求内第几个 Token。
-    # 主要用于前缀树缓存 RadixCache 命中、KV 复用、请求拷贝、回滚撤销。
-    token_to_req: Dict[int, Tuple[int, int]]
+    def __init__(self, size, max_context_len, device, enable_memory_saver):
+        self.size = size
+        self._alloc_size = size + 1    # +1: 第 0 行是 CUDA graph padding
+        self.max_context_len = max_context_len
+        self.device = device
+        self.req_to_token = torch.zeros(
+            (self._alloc_size, max_context_len),
+            dtype=torch.int32, device=device
+        )
+        self.free_slots = list(range(1, self._alloc_size))
 ```
 
-**容易混淆的概念区分（避坑）**：
-1. ReqToTokenPool VS TokenPool
-- **ReqToTokenPool：逻辑索引层**，只存 ID 映射，不管理显存内存，属于 CPU 侧调度结构；
-- **TokenPool：物理显存管理层**，负责 GPU 显存块分配、释放、碎片整理、地址管理，真正持有 KV Cache 内存。
-2. req 内 pos VS 全局 gid
-- `pos`：**请求私有局部下标**，只属于这一条请求，从 0 开始递增；
-- `gid`：**全局全局唯一下标**，整个推理引擎所有请求共用一套编号，直接对应显存数组下标。
+只有四个实例属性：
 
-**极简总结**：
-1. 本质：**一张二维对照表，把单条请求内部 Token 序号翻译成全局 KV 显存地址编号**；
-2. Prefill 批量填表，Decode 逐行追加，结束整张表清空回收；
-3. 不上手管显存，只做路由索引，是 Batch 调度与 KV 显存池的解耦中间层；
-4. 前缀缓存复用 KV 的核心载体就是复用已有全局 gid，直接挂载进映射表。
+| 属性 | 类型 | 含义 |
+|---|---|---|
+| `size` | `int` | 最大并发请求数 |
+| `max_context_len` | `int` | 单请求最大上下文长度 |
+| `req_to_token` | `torch.Tensor` | GPU 上的二维页表，`[req_pool_idx, pos] → kv_slot` |
+| `free_slots` | `list[int]` | 空闲行号的列表，从 1 开始 |
+
+**页表解读**：`req_to_token[3][127] = 2048` 表示"第 3 号请求槽位中，该请求的第 127 个 token，存储在 KV cache 的第 2048 号物理 slot"。
+
+---
+
+**三个方法**：
+
+`alloc(reqs: list[Req]) -> Optional[List[int]]`
+
+```python
+def alloc(self, reqs: list[Req]) -> Optional[List[int]]:
+    # 1. 先挑出已有 req_pool_idx 的请求（chunked prefill 复用）
+    reusing = [i for i, r in enumerate(reqs) if r.req_pool_idx is not None]
+    assert all(
+        reqs[i].inflight_middle_chunks > 0 or reqs[i].kv_committed_len > 0
+        for i in reusing
+    ), "reusing request must be chunked or have committed KV"
+
+    # 2. 为新请求分配行号
+    need_size = len(reqs) - len(reusing)
+    if need_size > len(self.free_slots):
+        return None                    # 不够 → 返回 None，上层调度阻塞
+    select_index = self.free_slots[:need_size]
+    self.free_slots = self.free_slots[need_size:]
+
+    # 3. 把行号写回 Req 对象
+    offset = 0
+    for r in reqs:
+        if r.req_pool_idx is None:
+            r.req_pool_idx = select_index[offset]
+            offset += 1
+    return [r.req_pool_idx for r in reqs]
+```
+
+**关键设计点**：
+
+- **只分配行号**，不填页表。填页表由 `common.py:write_cache_indices()` 通过 Triton kernel 完成。
+- **chunked prefill 复用**：同一请求跨多个 chunk 时不重新分配，复用已有的 `req_pool_idx`。
+- **返回 `None` 表示资源不足**，上层 scheduler 据此阻塞批次。
+
+`free(req: Req)`
+
+```python
+def free(self, req: Req):
+    assert req.req_pool_idx is not None, "request must have req_pool_idx"
+    self.free_slots.append(req.req_pool_idx)
+    req.req_pool_idx = None
+```
+
+行号归还到 `free_slots`，同时清除 `Req` 对象上的引用。
+
+`write(indices, values)`
+
+```python
+def write(self, indices, values):
+    self.req_to_token[indices] = values
+```
+
+直接写 GPU 张量。由 `common.py:write_cache_indices()` 调用，底层通过 Triton kernel `write_req_to_token_pool_triton` 批量写入 prefix + extended token 的物理 slot 映射。
+
+### `clear()`
+
+```python
+def clear(self):
+    self.free_slots = list(range(1, self._alloc_size))
+```
+
+重置所有空闲槽位。
+
+`available_size()`
+
+```python
+def available_size(self):
+    return len(self.free_slots)
+```
+
+返回当前可用槽位数。
+
+---
+
+**索引 0 的约定**
+
+```
+行 0:  CUDA graph padding（dummy 读写落在这里，无害）
+行 1~size: 实际请求
+```
+
+`free_slots` 初始化为 `list(range(1, self._alloc_size))`，永远不从 0 分配。CUDA graph 的 padded batch 把无效请求的 `req_pool_indices` 置 0，attention kernel 读写的都是 padding 行，不会污染真实数据。KV Canary (`jit_kernel/kv_canary/consts.py:8`) 也显式记录了这条约定：
+
+```python
+# Mirrors SGLang's ReqToTokenPool contract: req_pool_idx 0 is the CUDA-graph padding row
+```
+
+---
+
+**在整个推理流程中的位置**
+
+```
+Scheduler
+  │
+  ├─ alloc_req_slots()       ──→  ReqToTokenPool.alloc(reqs)    分配行号
+  ├─ write_cache_indices()   ──→  ReqToTokenPool.write()        Triton kernel 填页表
+  │
+  ▼
+Attention Backend
+  │
+  └─ init_forward_metadata()
+       req_to_token_pool.req_to_token  ──→  构建 page table 传给 GPU kernel
+```
+
+**Prefill 阶段**
+
+1. `alloc_req_slots()` 调用 `ReqToTokenPool.alloc(reqs)` 为每个请求分配 `req_pool_idx`
+2. `TokenToKVPoolAllocator` 为每个 token 分配物理 slot
+3. `write_cache_indices()` 调用 `ReqToTokenPool.write()` 把 `(req_pool_idx, pos) → kv_slot` 写入页表
+4. Attention kernel 读取 `req_to_token` 页表，按物理地址查 K/V
+
+**Decode 阶段**
+
+1. 新 token 的物理 slot 被分配后，追加一条映射到页表对应行末尾
+2. Attention kernel 读取整行 page table 完成全序列 attention
+
+**释放阶段**
+
+1. `release_kv_cache()` 从 `req_to_token[req_pool_idx]` 读出该请求所有物理 slot，归还给 `TokenToKVPoolAllocator`
+2. `ReqToTokenPool.free(req)` 归还行号到 `free_slots`
+
+---
+
+**全局访问方式**
+
+通过 forward context 获取：
+
+```python
+# forward_context.py:74
+def get_req_to_token_pool() -> ReqToTokenPool:
+    return get_attn_backend().req_to_token_pool
+```
+
+池在服务启动时由 `ModelRunner._init_pools()` 一次性创建，然后被所有 attention backend、radix cache、schedule batch 共享引用。
+
+---
+
+**实例化分支逻辑**
+
+在 `model_runner_kv_cache_mixin.py:_init_pools()` 中，根据模型类型和部署模式选择具体的池类：
+
+| 条件 | 池类 |
+|---|---|
+| 分离式 decode + Mamba 模型 | `HybridMambaDecodeReqToTokenPool` |
+| 分离式 decode + 无 Mamba | `DecodeReqToTokenPool` |
+| 普通模式 + Mamba 模型 | `HybridReqToTokenPool` |
+| 普通模式 + DSV4 on NPU | `DSV4NPUReqToTokenPool` |
+| 普通模式（默认） | `ReqToTokenPool` |
+
+---
+
+**层次**
+
+```
+ReqToTokenPool                         (基类, ~70行)
+  ├── HybridReqToTokenPool             (+Mamba conv/temporal state 池)
+  │     └── HybridMambaDecodeReqToTokenPool  (+分离式 decode pre-alloc)
+  ├── DSV4NPUReqToTokenPool            (+c4/c128 压缩 KV 页表)
+  └── MlxAuxiliaryStateReqToTokenPool  (+MLX 辅助状态池)
+
+DecodeReqToTokenPool                   (分离式 decode, 兄弟类, 非继承)
+```
+
+---
+
+**Triton Kernel 支持**
+
+`python/sglang/srt/mem_cache/triton_ops/common.py` 中两个关键 kernel：
+
+| Kernel | 功能 |
+|---|---|
+| `write_req_to_token_pool_triton` | 批量写入 prefix + extended token 的物理 slot 映射到 `req_to_token` |
+| `get_last_loc_triton` | 从 `req_to_token` 读取每个请求最后一个 token 的物理位置 |
+
+---
+
+**一句话总结**
+
+一张 GPU 上的二维 int32 张量，行是请求槽位、列是 token 位置、值是物理 slot 索引，外加一个空闲行号列表。不存请求元数据、不管物理显存、不感知前缀缓存——纯粹就是一张页表。
 
 - 1.2.2 `TokenToKVPoolAllocator`：Token 映射物理显存池（物理层）
 - 1.2.3 双层解耦优势：逻辑请求自由伸缩、物理显存统一池化
