@@ -547,6 +547,9 @@ def free_group_end(self):
 
 这两个 kernel 都利用了 page 内连续分配的特性——extend/decode 时如果当前 page 还有空位就直接用，否则才从 `free_pages` 拿新 page。
 
+alloc_extend 就是一个 GPU Triton kernel 驱动的页分配器——知道每个请求已经占了多少页（前缀缓存），算出还需要多少页，用三段填充法把已有页剩余空位、
+  完整新页、最后不完整页串联起来，返回一段物理上不连续但逻辑上无缝的光滑 slot 序列。
+
 ---
 
 `SWATokenToKVPoolAllocator`（`allocator/swa.py`）
@@ -631,26 +634,16 @@ out_cache_loc = alloc_token_slots(batch.tree_cache, batch.extend_num_tokens)
 
 - 1.2.3 双层解耦优势：逻辑请求自由伸缩、物理显存统一池化
 
-### 1.3 Block 分页缓存最小单元详解
-- 1.3.1 Block 结构体字段：block_id、seq_len、used、ref_count、device、layer_id
-- 1.3.2 Block Size 选型数学权衡：过小碎片多、过大复用率低
-- 1.3.3 GPU 静态预分配机制 `--mem-fraction-static` 显存切分原理
-
-### 1.4 BlockTable 索引映射机制
-- 1.4.1 单请求 BlockTable：seq_id → block_id 映射链表
-- 1.4.2 Batch 多请求 BlockTable 合并、隔离、复用机制
-- 1.4.3 动态扩容：空闲 Block 自动挂载、超限触发淘汰标记
-
-### 1.5 KV Cache 精细化元数据体系
+### 1.3 KV Cache 精细化元数据体系
 - 1.5.1 请求维度：req_id、prompt_len、gen_len、window_size、priority、timeout_ts
 - 1.5.2 块维度：hot_flag、swap_flag、ref_lock、kv_layer_offset、device_tag
 
-### 1.6 GLM-5.2 专属结构改造点
+### 1.4 GLM-5.2 专属结构改造点
 - 1.6.1 适配 1M 上下文超长链表索引扩容
 - 1.6.2 DSA 稀疏注意力：增加 token_mask 有效掩码字段
 - 1.6.3 MLA 压缩 KV 单独块存储结构改造
 
-### 1.7 工程踩坑与源码细节
+### 1.5 工程踩坑与源码细节
 - 1.7.1 静态显存比例设置不当导致空闲显存卡死
 - 1.7.2 Block 引用计数不释放导致显存泄漏
 
