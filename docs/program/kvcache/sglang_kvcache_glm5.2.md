@@ -264,7 +264,264 @@ DecodeReqToTokenPool                   (分离式 decode, 兄弟类, 非继承)
 
 同一条请求的多个 chunk 共享一行页表，每个 chunk 往同一行追加新的 slot 映射，KV cache 自然累积，attention 时只需读这一行就能看到所有 token 的 K/V。
 
-- 1.2.2 `TokenToKVPoolAllocator`：Token 映射物理显存池（物理层）
+#### 1.2.2 `TokenToKVPoolAllocator`：Token 映射物理显存池（物理层）
+
+**定位**：
+
+SGLang 内存池体系三层中的**分配层**——管理 KV cache 物理 slot 的分配和释放，但不持有真实的 K/V 数据：
+
+```
+ReqToTokenPool           ← 逻辑层：请求 → token 位置映射（页表）
+TokenToKVPoolAllocator   ← 分配层：物理 slot 的分配/释放/碎片整理（本类）
+KVCache                  ← 物理层：GPU 上真实的 K/V 张量
+```
+
+源码位于 `python/sglang/srt/mem_cache/allocator/` 包。
+
+---
+
+**类层次**
+
+```
+BaseTokenToKVPoolAllocator          (抽象基类, allocator/base.py:27)
+  ├── TokenToKVPoolAllocator         (per-token 分配, allocator/token.py:28)
+  ├── PagedTokenToKVPoolAllocator    (per-page 分配, allocator/paged.py:105)
+  ├── SWATokenToKVPoolAllocator      (Hybrid SWA, allocator/swa.py:20)
+  ├── HiSparseTokenToKVPoolAllocator (稀疏注意力, allocator/hisparse.py:15)
+  │     └── DeepSeekV4HiSparseTokenToKVPoolAllocator
+  └── (NPU 变体)
+```
+
+---
+
+**核心数据结构**
+
+基类 (`allocator/base.py`)
+
+```python
+class BaseTokenToKVPoolAllocator(abc.ABC):
+    def __init__(self, size, page_size, dtype, device, kvcache, need_sort):
+        self.size = size              # 物理 slot 总数
+        self.page_size = page_size    # 分配粒度: 1=per-token, >1=per-page
+        self._kvcache = kvcache       # 反向引用 KVCache，用于 CPU offload 等
+        self.need_sort = need_sort    # 是否对空闲页排序（前缀缓存命中率高时关闭）
+
+        self.free_pages = None        # 空闲物理索引（GPU tensor, int64）
+        self.release_pages = None     # 延迟释放队列（待排序合并）
+        self.free_group = []          # 批量释放暂存
+        self.is_not_in_free_group = True
+```
+
+`TokenToKVPoolAllocator`（`allocator/token.py:28-84`，总共 ~55 行）
+
+```python
+class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
+    """An allocator managing the indices to kv cache data."""
+
+    def __init__(self, size, dtype, device, kvcache, need_sort):
+        super().__init__(size, 1, dtype, device, kvcache, need_sort)
+        self.clear()
+
+    def clear(self):
+        # 索引 0 是 padded token 的 dummy 写入位置
+        self.free_pages = torch.arange(1, self.size + 1, dtype=torch.int64, device=device)
+        self.release_pages = torch.empty((0,), dtype=torch.int64, device=device)
+```
+
+两个 GPU tensor：
+
+| 属性 | 类型 | 含义 |
+|---|---|---|
+| `free_pages` | `torch.Tensor[int64]` | 空闲物理 slot 索引，按需排序 |
+| `release_pages` | `torch.Tensor[int64]` | 延迟释放队列，等 `merge_and_sort_free()` 时合并 |
+
+**为什么都在 GPU 上？** 分配/释放操作发生在每个 batch 的 forward 路径上，tensor 在 GPU 上可以直接参与 Triton kernel、CUDA kernel 的操作，避免 CPU↔GPU 同步。
+
+---
+
+**核心方法**：
+
+`alloc(need_size: int) -> Optional[torch.Tensor]`（`token.py:55-64`）
+
+```python
+def alloc(self, need_size: int):
+    # 不够且需要排序 → 先合并延迟释放队列再排序
+    if self.need_sort and need_size > len(self.free_pages):
+        self.merge_and_sort_free()
+
+    if need_size > len(self.free_pages):
+        return None              # 不够 → 返回 None，上层抛异常
+
+    select_index = self.free_pages[:need_size]
+    self.free_pages = self.free_pages[need_size:]
+    return select_index          # 返回 GPU tensor，直接给 kernel 用
+```
+
+与 `ReqToTokenPool.alloc()` 结构完全对称，但操作的是 **GPU tensor** 而非 Python list。返回的 `select_index` 就是物理 slot 编号，后续 `write_cache_indices()` 把它写入 `req_to_token` 页表。
+
+`free(free_index: torch.Tensor)`（`token.py:66-76`）
+
+```python
+def free(self, free_index: torch.Tensor):
+    if free_index.numel() == 0:
+        return
+
+    if self.is_not_in_free_group:
+        if self.need_sort:
+            # 需要排序 → 先丢进延迟释放队列
+            self.release_pages = torch.cat((self.release_pages, free_index))
+        else:
+            # 不需要排序 → 直接追加到 free_pages 末尾
+            self.free_pages = torch.cat((self.free_pages, free_index))
+    else:
+        # 批量释放模式 → 暂存到 free_group
+        self.free_group.append(free_index)
+```
+
+两阶段释放机制：
+- **`need_sort=True`**（前缀缓存命中率高）→ 先放到 `release_pages`，攒到 `alloc` 不够时再 `merge_and_sort_free()` 合并排序。排序保证碎片整理——连续 free 的 slot 不连续，排序后大块连续分配效率更高。
+- **`need_sort=False`**（命中率低、释放少）→ 直接追加到 `free_pages` 末尾，免排序开销。
+
+`merge_and_sort_free()`（`base.py:78-84`）
+
+```python
+def merge_and_sort_free(self):
+    if len(self.release_pages) > 0:
+        self.free_pages = torch.cat((self.free_pages, self.release_pages))
+        self.free_pages, _ = torch.sort(self.free_pages)
+        self.release_pages = torch.empty((0,), dtype=..., device=...)
+```
+
+把延迟释放队列和现有空闲 page 合并后排序，保证碎片整理。
+
+`available_size()`（`token.py:51-53`）
+
+```python
+def available_size(self):
+    return len(self.free_pages) + len(self.release_pages)
+```
+
+批量释放：`free_group_begin()` / `free_group_end()`（`base.py:69-76`）
+
+```python
+def free_group_begin(self):
+    self.is_not_in_free_group = False
+    self.free_group = []
+
+def free_group_end(self):
+    self.is_not_in_free_group = True
+    if self.free_group:
+        self.free(torch.cat(self.free_group))
+```
+
+批量释放场景（如一次释放多个请求的 KV）先把所有待释放索引收集到 `free_group`，最后一次性 `torch.cat` + `free`，减少 `torch.cat` 调用次数。
+
+---
+
+`PagedTokenToKVPoolAllocator`（`allocator/paged.py`）
+
+当 `page_size > 1` 时使用。core 思路同 `TokenToKVPoolAllocator`，但以**页**为最小分配单元。
+
+关键差异：
+
+| 方面 | `TokenToKVPoolAllocator` | `PagedTokenToKVPoolAllocator` |
+|---|---|---|
+| 粒度 | per-token (`page_size=1`) | per-page (`page_size=64/128/...`) |
+| `free_pages` 存什么 | slot 索引 | page 编号 |
+| `alloc()` 返回 | slot 索引 | `page_num * page_size + offset` 展开为 slot 索引 |
+| `free()` | 直接释放 slot | `torch.unique(free_index // page_size)` 去重后释放 page |
+
+额外方法：
+
+| 方法 | 用途 |
+|---|---|
+| `alloc_extend()` | Prefill 阶段分配，通过 Triton kernel `alloc_extend_kernel` 在同页内顺序追加 |
+| `alloc_decode()` | Decode 阶段每个请求分配 1 个新 slot，通过 `alloc_decode_kernel` |
+
+这两个 kernel 都利用了 page 内连续分配的特性——extend/decode 时如果当前 page 还有空位就直接用，否则才从 `free_pages` 拿新 page。
+
+---
+
+`SWATokenToKVPoolAllocator`（`allocator/swa.py`）
+
+Hybrid SWA（Sliding Window Attention）模型的分配器。内部组合**两个**子分配器：
+
+```
+SWATokenToKVPoolAllocator
+  ├── full_attn_allocator   ← 管理全 attention 层的 KV slot
+  └── swa_attn_allocator    ← 管理 SWA 层的 KV slot
+```
+
+核心：`full_to_swa_index_mapping` —— 一个映射表，`full_idx → swa_idx`。
+- `alloc()` / `alloc_extend()` / `alloc_decode()` 都同时分配 full 和 SWA 两套 slot
+- `free()` 从 full index 查出 swa index，两边一起释放
+- `translate_loc_from_full_to_swa()` 供 attention backend 把 full pool 的 `last_loc` 转为 swa pool 的位置
+
+---
+
+索引 0 的约定
+
+与 `ReqToTokenPool` 一致：
+
+```python
+# token.py:44
+self.free_pages = torch.arange(1, self.size + 1, ...)
+
+# paged.py:279
+self.free_pages = torch.arange(1, self.num_pages + 1, ...)
+```
+
+索引 0 留给 padded token 的 dummy 写入，永远不分配给真实请求。
+
+---
+
+在推理流程中的位置
+
+```
+alloc_for_extend()                        (common.py:456)
+  │
+  ├── alloc_req_slots()                  分配请求行号 (ReqToTokenPool)
+  │
+  ├── alloc_token_slots(tree_cache)  ←── 分配物理 slot (TokenToKVPoolAllocator)
+  │     │                                  tree_cache 内部调用
+  │     └── token_to_kv_pool_allocator.alloc(need_size)
+  │           → 返回 select_index: [1024, 1025, ..., 2047]
+  │
+  └── write_cache_indices()              把 select_index 写入 req_to_token 页表
+
+释放:
+release_kv_cache()                        (common.py:685)
+  │
+  ├── 从 req_to_token[req_pool_idx] 读出待释放的物理 slot
+  │
+  ├── token_to_kv_pool_allocator.free(indices_to_free)
+  │
+  └── req_to_token_pool.free(req)
+```
+
+关键点：**token_to_kv_pool_allocator 的调用入口不在 allocator 本身，而是通过 tree_cache（PrefixCache）代理**：
+
+```python
+# common.py:487
+out_cache_loc = alloc_token_slots(batch.tree_cache, batch.extend_num_tokens)
+# 内部: tree_cache.token_to_kv_pool_allocator.alloc(need_size)
+```
+
+因为前缀缓存命中时可能不需要分配新 slot——tree_cache 先把命中部分复用，缺口部分才调用 allocator 分配。
+
+---
+
+**总结**
+
+`TokenToKVPoolAllocator` 就是一个 **GPU 上的空闲 slot 管理器**：
+
+- 一个 `free_pages` int64 tensor 存所有空闲物理索引
+- `alloc()` 从头部切，返回连续的 GPU tensor 直接给 kernel 用
+- `free()` 追加到尾部（或延迟队列），按需排序做碎片整理
+- 不持有 KV 数据本身（数据在 `KVCache` 里），只管"哪些位置可用"
+- 与 `ReqToTokenPool` 镜像设计——一个管行号、一个管 slot，两者通过页表 `req_to_token` 关联
+
+
 - 1.2.3 双层解耦优势：逻辑请求自由伸缩、物理显存统一池化
 
 ### 1.3 Block 分页缓存最小单元详解
