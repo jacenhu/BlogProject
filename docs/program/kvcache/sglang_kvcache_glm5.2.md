@@ -218,7 +218,7 @@ head_dim (单头维度)：每个注意力头负责提取的特征向量长度。
 - 1.1.2 固定连续内存导致：显存碎片化严重、无法局部复用、长序列 OOM
 - 1.1.3 批量推理无法共享公共 Prompt，Prefill 算力严重浪费
 
-### 1.2 SGLang 双层内存池架构核心设计
+### 1.2 SGLang 三层内存池架构核心设计
 #### 1.2.1 `ReqToTokenPool`：请求级逻辑映射池（逻辑层）
 
 **定位**：
@@ -321,7 +321,7 @@ def write(self, indices, values):
 
 直接写 GPU 张量。由 `common.py:write_cache_indices()` 调用，底层通过 Triton kernel `write_req_to_token_pool_triton` 批量写入 prefix + extended token 的物理 slot 映射。
 
-### `clear()`
+#### `clear()`
 
 ```python
 def clear(self):
@@ -710,259 +710,214 @@ out_cache_loc = alloc_token_slots(batch.tree_cache, batch.extend_num_tokens)
 - 与 `ReqToTokenPool` 镜像设计——一个管行号、一个管 slot，两者通过页表 `req_to_token` 关联
 
 
-- 1.2.3 双层解耦优势：逻辑请求自由伸缩、物理显存统一池化
+#### 1.2.3 `KVCache`：物理存储层（`MHATokenToKVPool` / `MLATokenToKVPool` / `DSATokenToKVPool`）
 
-### 1.3 KV Cache 精细化元数据体系
-- 1.5.1 请求维度：req_id、prompt_len、gen_len、window_size、priority、timeout_ts
-- 1.5.2 块维度：hot_flag、swap_flag、ref_lock、kv_layer_offset、device_tag
+[待补充]
 
-### 1.4 GLM-5.2 专属结构改造点
-- 1.6.1 适配 1M 上下文超长链表索引扩容
-- 1.6.2 DSA 稀疏注意力：增加 token_mask 有效掩码字段
-- 1.6.3 MLA 压缩 KV 单独块存储结构改造
+#### 1.2.4 三层解耦优势：逻辑请求自由伸缩、物理显存统一池化
 
-### 1.5 工程踩坑与源码细节
-- 1.7.1 静态显存比例设置不当导致空闲显存卡死
-- 1.7.2 Block 引用计数不释放导致显存泄漏
+[待补充]
 
-## 第2章 SGLang RadixTree 基数树：全局前缀 KV 共享核心（SGLang 独家核心）
-### 2.1 RadixAttention 演进背景：PagedAttention 的终极短板
+### 1.3 `req_to_token` 统一页表机制（per-token 直接映射）
+- 1.3.1 `page_size=1`：per-token 粒度的 slot 映射
+- 1.3.2 `page_size>1`：`PagedTokenToKVPoolAllocator` 隐式分页
+- 1.3.3 与 vLLM BlockTable 的架构差异对比
+- 1.3.4 flashinfer 后端中 `req_to_token` → paged KV 格式的转换
+
+### 1.4 KV Cache 精细化元数据体系
+- 1.4.1 请求维度：`kv_committed_len`、`kv_allocated_len`、`req_pool_idx`、`priority`、`time_stats`
+- 1.4.2 前缀缓存维度：`prefix_indices`、`num_matched_prefix_tokens`、`host_hit_length`、`cache_protected_len`
+- 1.4.3 SWA 维度：`swa_evicted_seqlen`、`sliding_window_size`
+- 1.4.4 生命周期维度：`kv_committed_freed`、`kv_overallocated_freed`、`inflight_middle_chunks`
+
+### 1.5 Chunked Prefill：长文本分段与 `req_pool_idx` 复用机制
+
+### 1.6 工程踩坑与源码细节
+- 1.6.1 `_alloc_size = size + 1`：索引 0 的 CUDA graph padding 约定
+- 1.6.2 `need_sort` 与 `merge_and_sort_free`：碎片整理时机选择
+
+## 第2章 SGLang RadixCache 基数树：全局前缀 KV 共享核心
+### 2.1 RadixAttention 演进背景：PagedAttention 只能单请求复用
 - 2.1.1 分页缓存只能「单请求复用」，无法「跨请求前缀复用」
 - 2.1.2 企业级固定系统 Prompt 场景 70% 以上 KV 计算冗余
 
-### 2.2 HiRadixTree 整体树状架构
-- 2.2.1 根节点/中间节点/叶子节点层级职责
-- 2.2.2 全局唯一树管理所有请求的 KV 前缀路径
+### 2.2 SGLang 中多种 Cache 类型的全景图
+- 2.2.1 `RadixCache`（基础基数树缓存）
+- 2.2.2 `HiRadixCache`（带 HiCache 多级存储的基数树）
+- 2.2.3 `UnifiedRadixCache`（统一混合模型缓存，SSM + Attention）
+- 2.2.4 `SWARadixCache` / `MambaRadixCache` / `ChunkCache` / `SessionRadixCache`
 
-### 2.3 TreeNode 核心源码字段全解析
-- key（前缀 token id）、value（绑定 Block 物理地址）
-- children（子节点字典）
-- last_access_time（LRU 时序）
-- full_lock_ref（并发防误删锁）
-- layer_kv_offset（分层 KV 偏移）
-- device_mark：标记当前KV所在设备（GPU/CPU/Disk）
+### 2.3 `TreeNode` 核心源码字段全解析
+- 2.3.1 `key: RadixKey`（含 `token_ids` + `extra_key` + `is_bigram`）
+- 2.3.2 `value` / `host_value`：设备侧与主机侧 KV 数据指针
+- 2.3.3 `children` / `parent`：树拓扑结构
+- 2.3.4 `lock_ref` / `host_ref_counter`：双层引用计数防误删
+- 2.3.5 `last_access_time` / `hit_count` / `priority`：淘汰决策元数据
+- 2.3.6 `hash_value` / `write_through_pending_id` / `creation_time`
 
-### 2.4 最长公共前缀 LCP 匹配算法流程
+### 2.4 最长公共前缀匹配算法流程
 - 2.4.1 新请求从根节点逐层比对前缀 Token
-- 2.4.2 部分匹配、完全匹配、零匹配三种分支处理逻辑
+- 2.4.2 完全匹配 / 部分匹配 / 零匹配三种分支处理逻辑
 
-### 2.5 树节点分裂、新建、挂载、分支裁剪机制
+### 2.5 树节点分裂、新建、挂载、EvictionPolicy 多策略淘汰
 - 2.5.1 前缀部分重合触发节点分裂
-- 2.5.2 后缀增量生成叶子节点延伸
-- 2.5.3 过期分支懒删除机制
+- 2.5.2 后缀增量生成叶子节点延伸与 Insert 挂载
+- 2.5.3 `evict_policy.py`：可插拔淘汰策略（不限于 LRU+LFU）
+- 2.5.4 `EvictParams` / `EvictResult`：逐出控制与后置处理
 
-### 2.6 RadixTree 与 BlockTable 双向绑定关系
-- 2.6.1 全局树节点 → 物理显存 Block
-- 2.6.2 单请求 BlockTable → 挂靠全局树路径，实现多请求共享同一份 KV
+### 2.6 RadixCache 与 `req_to_token` + `token_to_kv_pool_allocator` 三者关系
+- 2.6.1 树节点 value → 物理 slot 索引 → `allocator.free()` 释放链路
+- 2.6.2 `PrefixCacheTrait` 协议：`req_to_token_pool` + `token_to_kv_pool_allocator` + `page_size`
 
-### 2.7 引用计数 RC 联动机制
-- 2.7.1 多会话共享节点计数叠加
-- 2.7.2 计数归零触发分支销毁与 Block 回收
+### 2.7 引用计数 RC 联动机制：`lock_ref` + `host_ref_counter`
+- 2.7.1 `IncLockRefResult` / `DecLockRefParams`：引用计数增减 API
+- 2.7.2 计数归零触发分支销毁与 slot 回收
 
-### 2.8 GLM-5.2 超大上下文 Radix 树适配
-- 2.8.1 百万 Token 树深度裁剪，防止查询时延爆炸
-- 2.8.2 DSA 稀疏 Token 过滤无效前缀，精简树分支
+### 2.8 线上问题：前缀失效、树内存泄漏、共享缓存脏数据
 
-### 2.9 线上问题：前缀失效、树内存泄漏、共享缓存脏数据
-
-# 第二部分：KV Cache 完整生命周期原理（生成 / 写入 / 读取 / 淘汰）
+# 第二部分：KV Cache 完整生命周期原理
 ## 第3章 KV Cache 生成机制：Prefill / Decode 双阶段
 ### 3.1 Prefill 预填充全量生成逻辑
 - 3.1.1 张量并行批量 Prefill 计算流程图解
-- 3.1.2 连续 KV 张量切分 Block 并挂载 RadixTree
-- 3.1.3 前缀命中分支：跳过重复计算，直接复用历史树节点
+- 3.1.2 `alloc_for_extend()`：KV slot 分配 + `write_cache_indices()` 写入页表
+- 3.1.3 前缀命中分支：`match_prefix()` → 跳过重复计算，复用历史树节点
 
 ### 3.2 Decode 增量单 Token 生成
 - 3.2.1 单步 forward 产出 KV 切片
-- 3.2.2 增量切片追加至叶子节点 Block 链表
+- 3.2.2 `alloc_decode()`：每 token 追加一个 slot，`kv_committed_len += 1`
 
-### 3.3 惰性显存分配策略
-- 3.3.1 不预占显存、随用随分
-- 3.3.2 解决长文本大显存预留浪费问题
-
-### 3.4 多并行架构下 KV 分片生成
-- TP 张量并行：按 head 维度切分 KV
-- PP 流水线并行：按 layer 层级隔离 KV 存储
-
-### 3.5 GLM-5.2 稀疏生成策略
-- 3.5.1 DSA 动态丢弃无效 token KV
-- 3.5.2 MLA 低秩压缩 KV 单独生成路径
+### 3.3 惰性显存分配策略：不预占显存、随用随分
+### 3.4 多并行架构下 KV 分片生成：TP 按 head 切分 / PP 按 layer 隔离
+### 3.5 [GLM-5.2 适配] DSA 稀疏注意力的 token_mask 选择性 KV 生成
 
 ## 第4章 KV Cache 写入机制：显存固化与数据落地
-### 4.1 GPU 原地零拷贝写入主路径
-- CUDA Kernel 直接写入 Block 显存
-- 张量视图复用，无 `clone/copy` 冗余
+### 4.1 GPU 原地零拷贝写入主路径：`KVCache.set_kv_buffer()`
+- 4.1.1 `KVWriteLoc`：full pool + SWA pool 的二元写入目标
+- 4.1.2 CUDA kernel 直接写入 Block 显存，张量视图复用，无 `clone/copy`
 
-### 4.2 跨设备写入链路前置基础
-- CPU → GPU 异步拷贝前置条件
-- 多卡分布式 KV 分片同步一致性约束
-
-### 4.3 追加写入 vs 覆盖写入
-- Decode 增量：追加写入
-- 上下文重置/窗口刷新：覆盖重建
-
-### 4.4 Batch 并发写入锁竞争
-- 全局 RadixTree 读写锁
-- Block 空闲池资源竞争规避
-
-### 4.5 GLM-5.2 超长文本分段写入、滑动窗口截断写入
+### 4.2 跨设备写入链路：`get_cpu_copy()` / `load_cpu_copy()` 同步 offload
+### 4.3 追加写入（Decode 增量）vs 覆盖写入（上下文重置/窗口刷新）
+### 4.4 Batch 并发写入锁竞争：RadixCache 全局读写锁与 Block 空闲池竞争规避
+### 4.5 [GLM-5.2 适配] 超长文本分段写入与 SWA 滑动窗口截断写入
 
 ## 第5章 KV Cache 读取机制：Attention 计算核心链路
-### 5.1 标准读取全流程
-Query 计算 → RadixTree 前缀检索 → BlockTable 寻址 → 物理块拼接 → Attention
-
-### 5.2 碎片化 Block 张量合并算子优化
+### 5.1 标准读取全流程：Query 计算 → `req_to_token` 查页表 → `create_flashinfer_kv_indices_triton` 转换为 paged KV → Attention kernel
+### 5.2 `IndicesUpdater`：`req_to_token` → flashinfer `paged_kv_indices` 的 Triton 转换 kernel
 ### 5.3 零拷贝读取、in-place 视图复用、预取优化
-### 5.4 多卡跨分片 KV 聚合读取逻辑
-### 5.5 多级缓存命中分支：L1 命中 / L2/L3 回灌读取
-### 5.6 GLM-5.2 RoPE 位置偏移修正与稀疏精准读取
+### 5.4 多卡跨分片 KV 聚合读取：TP AllGather / EP 路由分发
+### 5.5 多级缓存命中分支：L1 (GPU) 直接命中 / L2 (CPU HostKVCache) → `load_cpu_copy` / L3 (Storage Backend) → `PrefetchOperation`
+### 5.6 [GLM-5.2 适配] RoPE 位置偏移修正与稀疏 Token 精准读取
 
 ## 第6章 KV Cache 淘汰与内存回收机制
-### 6.1 显存水位线分级管控
-- 软阈值：降级 Swap，触发跨设备传输下沉数据
-- 硬阈值：强制淘汰，直接释放Block
+### 6.1 显存水位线分级管控：软阈值降级 Swap / 硬阈值强制淘汰
+### 6.2 `evict_policy.py`：可插拔淘汰策略（LRU / LFU / SLRU / FIFO）
+### 6.3 [GLM-5.2 适配] SWA 窗口外 KV 强制过期 + DSA 无效 Token KV 主动释放
+### 6.4 细粒度 slot 回收 vs 粗粒度整会话回收
+### 6.5 双层 RC 防误删：`TreeNode.lock_ref` + `host_ref_counter`
+### 6.6 淘汰后置：树分支修剪、`req_to_token` 索引刷新、slot 归还 `free_pages`、HiCache 下沉传输标记
 
-### 6.2 双淘汰算法实现
-- LRU：基于 RadixTreeNode 时间戳淘汰冷分支
-- LFU：优先保留高频共享前缀
+# 第三部分：专项模块——KV Cache 跨设备传输机制
+## 第7章 KV Cache 跨设备传输体系设计
+### 7.1 传输场景全景：SGLang 中实际存在的三类传输
+- 7.1.1 GPU↔CPU 请求级 Offload：`Req.offload_kv_cache()` / `load_kv_cache()`
+- 7.1.2 Prefill→Decode 分离式传输（Disaggregation PD）：NCCL / NIXL 跨节点
+- 7.1.3 HiCache 层级传输：HostKVCache ↔ Storage Backend 的后台数据流转
 
-### 6.3 GLM-5.2 专属淘汰规则
-- 滑动窗口外 KV 强制过期
-- 稀疏无效 Token KV 主动释放
+### 7.2 GPU↔CPU Offload 详细链路
+- 7.2.1 `KVCache.get_cpu_copy()` / `load_cpu_copy()`：同步 D2H / H2D 拷贝
+- 7.2.2 `TorchMemorySaverAdapter`：显存压缩与 Memory Saver 机制
+- 7.2.3 `LayerDoneCounter`：layer-wise 传输控制（`register_layer_transfer_counter`）
 
-### 6.4 细粒度 Block 回收 / 粗粒度整会话回收
-### 6.5 双层 RC 防误删：树节点引用计数 + Block 引用计数
-### 6.6 淘汰后置：树分支修剪、索引刷新、显存归还、标记待传输下沉
+### 7.3 Disaggregation PD 传输链路
+- 7.3.1 `DecodeReqToTokenPool`：预分配 slot + 传输 slot 的分离池设计
+- 7.3.2 NCCL 集合通信 vs NIXL 点对点传输 vs RDMA 零拷贝
+- 7.3.3 `kv_cache_builder.py`：KV 数据序列化与反序列化
+- 7.3.4 SWA allocator 的 `alloc_extend_swa_tail`：decode 端仅传输 SWA 尾部
 
-# 第三部分：专项模块——KV Cache 全场景跨设备传输机制（新增独立完整章节）
-## 第7章 KV Cache 跨设备传输体系设计（补齐缺失模块）
-### 7.1 传输场景分类与业务诉求
-#### 7.1.1 同主机异构传输：GPU ↔ CPU 内存 Swap 换入换出
-#### 7.1.2 多卡节点内传输：TP/EP 并行多GPU之间KV分片同步、聚合、广播
-#### 7.1.3 节点间分布式传输：多机集群KV Cache远程拉取、推送、持久化
-#### 7.1.4 层级降级传输：GPU冷数据下沉CPU/SSD；下级缓存数据回灌GPU
+### 7.4 HiCache 层级传输：HostKVCache ↔ Storage Backend
+- 7.4.1 `PoolTransfer` / `PoolName`：多池类型的传输抽象
+- 7.4.2 `GetPageContext` / `SetPageContext`：分页传输 API
+- 7.4.3 RDMA Batch 操作与 `STORAGE_BATCH_SIZE` 批量化
+- 7.4.4 `PrefetchTimeoutConfig`：超时控制的线性策略
 
-### 7.2 传输前置依赖：数据序列化与格式标准化
-#### 7.2.1 原生FP16/BF16张量内存排布序列化规则
-#### 7.2.2 FP8量化压缩传输：量化缩放因子随KV一同打包传输
-#### 7.2.3 RadixTree元数据轻量化序列化：TreeNode拓扑、引用计数、设备标记同步
-#### 7.2.4 Block元数据与KV张量分离打包，减少冗余传输开销
+### 7.5 [GLM-5.2 适配] 大 KV 量下的传输优化方向
+- 7.5.1 MLA 低秩压缩 KV 减少传输字节量
+- 7.5.2 DSA 稀疏 Mask 过滤仅传输有效 Token
 
-### 7.3 同主机 GPU <-> CPU 内存传输链路
-#### 7.3.1 主动下沉传输：显存超限→选取LRU冷Block→调用cudaMemcpyAsync异步拷贝至Host内存
-#### 7.3.2 回灌加载传输：读取命中CPU缓存→DMA无CPU中转直接写入GPU显存
-#### 7.3.3 传输队列设计：生产者下沉队列、消费者回灌队列，解耦推理主线程
-#### 7.3.4 内存页锁（pin_memory）优化，规避页交换导致的传输抖动
+### 7.6 传输链路常见故障与排坑
 
-### 7.4 单节点多GPU之间KV Cache并行传输（TP/EP并行必备）
-#### 7.4.1 张量并行TP：按头维度分片KV，AllGather聚合传输流程
-#### 7.4.2 专家并行EP：GLM-5.2 MoE场景下，专家卡KV路由分发、结果收集传输
-#### 7.4.3 通信原语选型：NCCL异步集合通信 vs 点对点Send/Recv
-#### 7.4.4 RadixTree多卡副本同步策略：主卡维护全局树，副卡按需拉取前缀节点
+# 第四部分：模型专属适配与深度交互（以 DeepSeek V4 / GLM 系列为例）
+## 第8章 非标准 Attention 架构对 KV Cache 的强约束
+### 8.1 SGLang 中已有的非标准 KV Cache 实现全景
+- 8.1.1 `MLATokenToKVPool`：MLA 低秩压缩 KV 的专用物理池
+- 8.1.2 `DSATokenToKVPool`：DSA 稀疏注意力的专用物理池
+- 8.1.3 `HiSparseDSATokenToKVPool` + `HiSparseTokenToKVPoolAllocator`：稀疏二级池
+- 8.1.4 `DeepSeekV4TokenToKVPool`：c4/c128 多级压缩池体系
 
-### 7.5 CPU内存 <-> SSD磁盘持久化传输
-#### 7.5.1 批量落盘：L2内存打满后，批量将KV二进制流写入SSD文件
-#### 7.5.2 按需加载：会话复用时根据会话索引随机读取磁盘指定块
-#### 7.5.3 文件组织结构：按req_id分目录、按Block分文件，支持断点续传与过期清理
-#### 7.5.4 IO优化：顺序写入、预分配文件块、合并小IO请求
+### 8.2 MLA（Multi-Head Latent Attention）KV Cache 存储对比分析
+- 8.2.1 `kv_lora_rank` 压缩 vs 全量 KV 的存储/传输差异
+- 8.2.2 flashinfer_mla_backend 中的 paged KV 转换适配
 
-### 7.6 传输任务调度与流量管控
-#### 7.6.1 优先级队列：推理刚需回灌传输 > 后台冷数据降级传输
-#### 7.6.2 带宽限流：单卡最大并发传输任务数，防止PCIe带宽打满阻塞推理
-#### 7.6.3 传输超时与重试机制：网络/IO异常下数据重传与脏块丢弃
-#### 7.6.4 传输状态绑定RadixTreeNode：标记「传输中/已下沉/已回灌/失效」
+### 8.3 DSA（Dense-Sparse Attention）稀疏窗口机制
+- 8.3.1 Dense Layer + Sparse Layer 交替架构下的双缓存设计
+- 8.3.2 `sparsity/` 目录下的稀疏索引与压缩状态管理
 
-### 7.7 GLM-5.2 架构下传输适配改造
-#### 7.7.1 DSA稀疏KV：仅传输有效Token对应KV，过滤空掩码数据，缩减传输量
-#### 7.7.2 MLA压缩KV单独传输链路：低秩矩阵单独序列化，避免冗余维度拷贝
-#### 7.7.3 1M超长上下文：分块分片流式传输，禁止一次性加载全量KV至内存
-#### 7.7.4 MoE多专家卡之间KV分片路由传输路由表动态生成逻辑
-
-### 7.8 传输链路常见故障与排坑
-- PCIe带宽瓶颈导致Decode时延毛刺
-- 多卡NCCL通信超时、KV分片维度错乱
-- 磁盘IO阻塞主线程推理、异步队列堆积OOM
-- 传输中途会话销毁导致悬空脏数据与内存泄漏
-
-# 第四部分：GLM-5.2 模型专属适配与深度交互
-## 第8章 GLM-5.2 模型架构对 KV Cache 的强约束
-### 8.1 GLM-5.2 核心架构特性
-- Decoder-only 结构、双向注意力偏置
-- DSA 稠密-稀疏交替动态注意力窗口
-- MLA 低秩压缩 KV 机制
-- MoE 8 Expert 混合专家路由特性
-
-### 8.2 Indexer KV（全量）与 MLA KV（压缩）双缓存分组架构
-### 8.3 Transformer 层 KV 输出与 SGLang 缓存模块对接细节
 ### 8.4 RoPE 位置编码偏移引发的索引修正原理
 ### 8.5 Continuous Batch 动态批处理资源调度
-### 8.6 FP8 量化 KV Cache 数值对齐与精度兼容
-### 8.7 MoE 专家并行 EP 下多卡 KV 分布与路由、跨卡传输规则
+### 8.6 FP8 量化 KV Cache：`store_dtype=torch.uint8` 的数值对齐与精度兼容
+### 8.7 MoE 专家并行 EP 下多卡 KV 分布与路由
+### 8.8 [GLM-5.2 推演] 结合 MLA + DSA + MoE 的综合 KV Cache 架构设计方向
 
-## 第9章 SGLang × GLM-5.2 端到端全推理链路（时序闭环）
-### 9.1 请求接入、分词、元信息初始化
-### 9.2 RadixTree 前缀匹配判定（复用/新建分支）
-### 9.3 Prefill 全量/增量双分支执行流程
-### 9.4 Decode 循环生成+增量 KV 持续挂载
-### 9.5 多轮对话缓存复用加速逻辑
-### 9.6 会话超时/结束资源回收链路
-### 9.7 显存超限→触发淘汰→执行跨设备下沉传输→数据存入下级缓存
-### 9.8 下级缓存命中→发起回灌传输→加载KV至GPU恢复推理
-### 9.9 GLM-5.2 工具调用、长摘要、记忆裁剪特殊链路
+## 第9章 SGLang 端到端全推理链路时序闭环
+### 9.1 请求接入、分词、`Req` 对象元信息初始化
+### 9.2 RadixCache `match_prefix()` 前缀匹配判定（命中/部分命中/未命中）
+### 9.3 Prefill 全量 / Chunked Prefill 增量双分支执行流程
+### 9.4 Decode 循环生成 + 增量 KV 持续挂载（`kv_committed_len` 递增）
+### 9.5 多轮对话缓存复用加速逻辑（`SessionRadixCache` 会话级缓存）
+### 9.6 会话超时/结束资源回收链路：`release_kv_cache()` 完整流程
+### 9.7 显存超限→触发淘汰→`evict()` → 可能触发 HiCache 下沉传输
+### 9.8 下级缓存命中→`load_back()` → `load_cpu_copy` 回灌 GPU
+### 9.9 GLM-5.2 场景推演：工具调用 / 长摘要 / 记忆裁剪特殊链路
 
-# 第五部分：HiCache 多级缓存工程优化（突破显存上限）
-## 第10章 SGLang HiCache 三级缓存架构原理
-### 10.1 L1/L2/L3 三级存储层级定义
-- L1：GPU 显存（热点 Radix 树+活跃Block，原生读写，无需传输）
-- L2：CPU 内存 Swap（中频冷数据，依托GPU↔CPU传输链路完成换入换出）
-- L3：SSD 磁盘持久化（低频会话归档，依托内存↔磁盘传输链路落盘与加载）
+# 第五部分：HiCache 多级缓存工程优化
+## 第10章 SGLang HiCache 多级缓存架构原理
+### 10.1 三级存储层级定义
+- 10.1.1 L1：GPU 显存（`KVCache` 物理池，原生读写，零拷贝）
+- 10.1.2 L2：CPU 内存（`HostKVCache`，`pool_host/base.py`，pin_memory + DMA）
+- 10.1.3 L3：多后端存储层（`storage/`：file / mooncake_store / hf3fs / lmcache / nixl / eic / simm / aibrix_kvcache）
 
-### 10.2 智能升降级调度算法
-- 降级：显存满 → 选定冷Radix子树 → 调用下沉传输任务 → 存入L2/L3
-- 回灌：下级缓存命中 → 发起异步回灌传输 → 重载KV至GPU并挂载RadixTree
-- 预取机制：预判后续访问Radix路径，提前下发预传输任务
+### 10.2 多池类型管理：`PoolName` 枚举与 `PoolTransfer` 传输抽象
+### 10.3 `HiCacheController` + `HybridCacheController`：升降级调度与预取
+- 10.3.1 `PrefetchOperation`：预判后续访问路径，提前下发 H2D 传输
+- 10.3.2 `PoolHitPolicy`：命中策略与降级触发条件
 
-### 10.3 跨设备传输优化手段复用第7章体系
-- FP8量化压缩传输、DMA异步无阻塞拷贝、队列优先级调度
+### 10.4 与第 7 章传输链路的联动：`_cuda_host_unregister` / DMA / RDMA Batch
+### 10.5 HiCache 与 Disaggregation PD 的协同：`StorageMedium` 标记
+### 10.6 工程稳定性方案：IO 限流、脏数据校验、过期会话自动清理
 
-### 10.4 GLM-5.2 百万长文本 & 高并发会话落地场景
-### 10.5 工程稳定性方案
-- IO限流、脏数据校验、过期会话自动清理、分布式缓存跨节点传输共享
+# 第六部分：源码导读、性能测评与技术展望
+## 第11章 核心源码路径导读
+### 11.1 内存池与页表：`memory_pool.py`（`ReqToTokenPool` / `KVCache` 子类）→ `allocator/`（`TokenToKVPoolAllocator` / `PagedTokenToKVPoolAllocator` / `SWATokenToKVPoolAllocator`）
+### 11.2 RadixCache 前缀匹配与淘汰：`radix_cache.py` → `hiradix_cache.py` → `unified_radix_cache.py` → `evict_policy.py`
+### 11.3 跨设备传输：`KVCache.get_cpu_copy/load_cpu_copy` → `disaggregation/decode.py` → `pool_host/` + `storage/`
+### 11.4 Attention Backend 中的 paged KV 转换：`flashinfer_backend.py` → `triton_ops/kv_indices.py`
+### 11.5 调度入口与工具函数：`common.py`（`alloc_for_extend` / `release_kv_cache` / `write_cache_indices`）
 
-# 第六部分：性能测评、源码剖析与技术展望
-## 第11章 多框架横向性能对比
-### 11.1 测试基线
-HuggingFace / vLLM(Paged) / SGLang(Radix无前缀共享) / SGLang+HiCache+完整传输链路
-
-### 11.2 GLM-5.2 128k/1M 核心指标
-TTFT、TPOT、QPS、显存占用、内存开销、缓存命中率、PCIe/网络传输时延、IO耗时
-
-## 第12章 核心源码路径导读
-### 12.1 BlockManager、内存池、KV 读写核心源码
-### 12.2 RadixTree 前缀匹配、节点分裂、LRU 淘汰源码
-### 12.3 新增：KV跨设备传输、NCCL通信、DMA拷贝、Swap任务调度源码入口
-### 12.4 HiCache 多级调度、Swap下沉/回灌、磁盘序列化源码
+## 第12章 多框架横向性能对比
+### 12.1 测试基线：vLLM (PagedAttention) / SGLang (RadixCache) / SGLang + HiCache
+### 12.2 核心指标：TTFT、TPOT、QPS、显存占用、缓存命中率、传输时延
 
 ## 第13章 架构局限与未来演进
-### 13.1 当前短板：树深度过高、多卡同步传输开销、稀疏KV无效传输冗余
-### 13.2 未来方向：Chunked Prefill、分布式全局KV缓存集群、RDMA零拷贝跨机传输、自适应智能分级传输调度
+### 13.1 当前短板：树深度过高、`req_to_token` 对超长上下文的存储开销、PD offload 同步延迟
+### 13.2 未来方向：Chunked Prefill 优化、分布式全局 KV Cache 集群、RDMA 零拷贝跨机传输、自适应多级缓存调度
 
-## 14 附录
-### 14.1 传统原版 PagedAttention
+## 附录
+### A.1 传统原版 PagedAttention 原理回顾
 
 论文：*Efficient Memory Management for Large Language Model Serving with PagedAttention*（arXiv:2309.06180）
 
 传统原版 PagedAttention = 把 LLM 推理的 KV 缓存做成操作系统虚拟内存分页系统，用离散固定大小显存块 + 页表映射替代整块连续内存预分配，根治 KV 缓存显存碎片化，大幅提升大模型在线服务并发吞吐量。
 
-### 14.2 GPU Warp
-在 NVIDIA 的 GPU 架构中，线程并不是完全独立执行的，而是被分组管理的。
-Warp 是 GPU 调度和执行的基本单位。
-一个 Warp 通常包含 32 个线程（在 NVIDIA GPU 中）。
-SIMT 模型：这 32 个线程会同时执行完全相同的指令。这被称为“单指令多线程”。
-SIMT 全称是 Single Instruction, Multiple Threads（单指令，多线程）
+### A.2 `KVCache` 子类全景参考（`MHATokenToKVPool` / `MLATokenToKVPool` / `DSATokenToKVPool` / `HiSparseDSATokenToKVPool` / `DeepSeekV4TokenToKVPool`）
 
-## 增补说明
-1. 单独拆分**第7章 KV Cache跨设备传输专项章节**，把同主机GPU-CPU、多卡NCCL通信、CPU-磁盘落盘加载、分布式集群拉取推送、传输队列/优先级/容错/GLM适配全部完整补全；
-2. 全文原有链路（淘汰降级、HiCache升降级、多卡并行）全部联动绑定传输流程，不再存在数据跨设备流转逻辑断层；
-3. 严格遵循标准Markdown层级：`#`一级大篇、`##`章节、`###`小节、`####`细分要点，格式可直接用于文档发布；
-4. 每处传输场景均配套源码逻辑、故障排查、GLM-5.2模型定制化修改点，技术细节粒度与前文完全统一。
+### A.3 `TokenToKVPoolAllocator` 子类全景参考（`TokenToKVPoolAllocator` / `PagedTokenToKVPoolAllocator` / `SWATokenToKVPoolAllocator` / `HiSparseTokenToKVPoolAllocator`）
