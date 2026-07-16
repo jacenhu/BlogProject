@@ -28,6 +28,7 @@ export default defineConfig({
   themeConfig: {
     nav,
     sidebar,
+    outline: [2, 4],
     outlineTitle: '本页目录',
     lastUpdatedText: '更新时间',
     docFooter: {
