@@ -262,6 +262,8 @@ DecodeReqToTokenPool                   (分离式 decode, 兄弟类, 非继承)
 
 一张 GPU 上的二维 int32 张量，行是请求槽位、列是 token 位置、值是物理 slot 索引，外加一个空闲行号列表。不存请求元数据、不管物理显存、不感知前缀缓存——纯粹就是一张页表。
 
+同一条请求的多个 chunk 共享一行页表，每个 chunk 往同一行追加新的 slot 映射，KV cache 自然累积，attention 时只需读这一行就能看到所有 token 的 K/V。
+
 - 1.2.2 `TokenToKVPoolAllocator`：Token 映射物理显存池（物理层）
 - 1.2.3 双层解耦优势：逻辑请求自由伸缩、物理显存统一池化
 
