@@ -1105,7 +1105,7 @@ Chunked prefill 的额外收益是**与其他请求的 batching**：调度器可
 
 - 1.6.2 `need_sort` 与 `merge_and_sort_free`：碎片整理时机选择
 
-`BaseTokenToKVPoolAllocator.need_sort`（`allocator/base.py:49`）控制 slot 释放策略：
+`BaseTokenToKVPoolAllocator.need_sort`（`allocator/base.py:43`）控制 slot 释放策略：
 
 ```python
 self.need_sort = need_sort          # 是否需要排序
@@ -2228,7 +2228,7 @@ def _get_key_buffer(self, layer_id: int):
 
 **CUDA Graph 路径的固定 buffer 优化**：
 
-`flashinfer_backend.py` 的 `call_begin_forward`（L1322）在 CUDA graph 启用时：
+`flashinfer_backend.py` 的 `call_begin_forward`（L1324）在 CUDA graph 启用时：
 
 ```python
 if wrapper.is_cuda_graph_enabled:
