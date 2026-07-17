@@ -896,22 +896,246 @@ RadixCache 的前缀共享、引用计数、淘汰策略，操作的全是"slot 
 **一句话总结**：逻辑层管"谁映射到哪"、分配层管"哪块空闲/何时整理"、物理层管"数据以什么布局落地"——三者用一张 int32 页表 + 一组 int64 空闲索引解耦，让请求逻辑、显存碎片、存储布局三件事各自独立演进，是 SGLang 能一套代码同时支撑 MHA/MLA/DSA/SWA/Hybrid 多种 KV 架构的架构根基。
 
 ### 1.3 `req_to_token` 统一页表机制（per-token 直接映射）
+
+`req_to_token` 是三个池类互通的**中央页表**，承载 `(req_pool_idx, pos) → kv_slot` 的全部映射。它是 SGLang 与 vLLM **最根本的架构差异**之一，直接决定了 KV 分配/释放/读取的粒度与灵活性。
+
 - 1.3.1 `page_size=1`：per-token 粒度的 slot 映射
+
+默认 `page_size=1`（大多数 MHA 模型）下，`req_to_token` 是一张 `[max_batch, max_context_len]` 的 `int32` GPU 张量。其创建逻辑在 `ReqToTokenPool.__init__`（`memory_pool.py:244`）：
+
+```python
+self.req_to_token = torch.zeros(
+    (self._alloc_size, max_context_len),   # _alloc_size = size + 1
+    dtype=torch.int32, device=device
+)
+```
+
+**物理含义**：`req_to_token[3][127] = 2048` 表示"第 3 号请求的第 127 个 token，其 KV 存储在物理 slot #2048"。
+
+**写入由 Triton kernel 驱动**。`write_req_to_token_pool_triton`（`triton_ops/common.py:9`）每个请求一个 block，分两步：
+
+```python
+@triton.jit
+def write_req_to_token_pool_triton(req_to_token_ptr, req_pool_indices,
+    prefix_tensors, pre_lens, seq_lens, extend_lens, out_cache_loc, ...):
+    pid = tl.program_id(0)
+    req_pool_index = tl.load(req_pool_indices + pid)
+    pre_len = tl.load(pre_lens + pid)
+    seq_len = tl.load(seq_lens + pid)
+    prefix_tensor = tl.load(prefix_tensors + pid).to(tl.pointer_type(tl.int64))
+
+    # Step 1: 写入前缀命中段
+    for i in range(tl.cdiv(pre_len, BLOCK_SIZE)):
+        offset = tl.arange(0, BLOCK_SIZE) + i * BLOCK_SIZE
+        mask = offset < pre_len
+        value = tl.load(prefix_tensor + offset, mask=mask)
+        tl.store(req_to_token_ptr + req_pool_index * req_to_token_ptr_stride + offset,
+                 value, mask=mask)
+
+    # Step 2: 写入新分配的 extend 段
+    cumsum_start = 0  # prefix sum of extend_lens for prior requests
+    for i in range(pid):
+        cumsum_start += tl.load(extend_lens + i)
+    for i in range(tl.cdiv(seq_len - pre_len, BLOCK_SIZE)):
+        offset = tl.arange(0, BLOCK_SIZE) + i * BLOCK_SIZE
+        mask = offset < (seq_len - pre_len)
+        value = tl.load(out_cache_loc + cumsum_start + offset, mask=mask)
+        tl.store(req_to_token_ptr + req_pool_index * req_to_token_ptr_stride
+                 + offset + pre_len, value, mask=mask)
+```
+
+两步写入：前缀部分从 `prefix_tensors[i]` 读出树缓存命中的 slot 序列（长度 `pre_len`），延申部分从 `out_cache_loc` 读出本轮新分配的 slot 段（长度 `extend_len`）。两步写完后，页表行 `[req_pool_index, 0:seq_len]` 完整覆盖该请求全部已确认 token 的 KV 物理位置。
+
+**读取由 `get_last_loc` 驱动**。`get_last_loc_triton`（`triton_ops/common.py:144`）从页表取每请求最后一个 token 的物理位置：`req_to_token[req_pool_indices, prefix_lens - 1]`。decode 阶段用它找"当前页的最后一槽"，判断是否需要申请新页（`alloc_paged_token_slots_decode`）。HIP 上 Triton 的 `int32→int64` store 有 bug，所以 HIP 路径走 `get_last_loc_triton_safe`（L91）——中间存 int32 结果再统一 cast。
+
 - 1.3.2 `page_size>1`：`PagedTokenToKVPoolAllocator` 隐式分页
+
+`page_size>1` 时 `req_to_token` 的**格式不变**（仍是 `[req_pool_idx, pos] → kv_slot`），变化只发生在分配层：
+
+| 方面 | `page_size=1` | `page_size>1` |
+|---|---|---|
+| allocator 粒度 | per-token slot | per-page（页编号 `page_num * page_size + offset` → slot） |
+| `alloc` 返回 | slot 索引序列 | 页级展开后的 slot 索引序列 |
+| `free` | 直接释放 slot | `torch.unique(free_index // page_size)` 去重后按页释放 |
+| 分配 kernel | `allocator.alloc()` | `alloc_paged_token_slots_extend` 三段填充（已有页剩余 + 完整新页 + 最后不完整页） |
+| 页表内容 | slot 是连续的 | slot 在 page 内连续，跨 page 不连续——但页表行统一存 slot，**不暴露 page 概念** |
+
+核心设计：**页表行对 attention backend 永远是一段 `int32` slot 序列**，backend 不需要知道 page 边界。`PagedTokenToKVPoolAllocator` 在分配时做三段填充串成"逻辑连续、物理可能多次跨越 page 边界"的 slot 序列，写进页表后对 downstream 透明。这使得 flashinfer 等 backend 可以把 `page_size=1` 和 `>1` 统一处理——只需要每请求一个 `seq_len` 和对应的 slot 序列。
+
 - 1.3.3 与 vLLM BlockTable 的架构差异对比
+
+| 维度 | vLLM BlockTable | SGLang `req_to_token` |
+|---|---|---|
+| 粒度 | per-block（block_id → KV block） | **per-token**（pos → KV slot） |
+| 形状 | `[max_batch, max_blocks]` | `[max_batch, max_context_len]` |
+| block 概念 | 显式：block table 存 block id，kernel 内部 `block_id * block_size + offset` 算 token 位置 | 隐式：当 `page_size>1` 时在分配层做 page 映射再展开，页表本身不存 page |
+| 跨请求前缀共享 | block table 是 per-request，无法共享 | `req_to_token` 各请求前缀段直接指向同一段 slot（RadixCache 管理） |
+| 内存开销 | `O(batch × max_blocks)` | `O(batch × max_context_len)` |
+
+SGLang 的 per-token 映射虽然有更高的页表存储开销（`max_batch × max_context_len × 4` 字节），但换来了**前缀共享的天然支持**：请求 A 和 B 共享 1000 token 前缀时，它们页表行前 1000 列的值完全相同，直接指向同一段物理 slot。vLLM 的 block table 无法做到这一点——block 是块级单位，块内 token 顺序固定，必须整块复制页表。
+
 - 1.3.4 flashinfer 后端中 `req_to_token` → paged KV 格式的转换
 
+flashinfer 的 attention kernel 要求 paged KV 格式输入：`paged_kv_indices`（一维 int32，把所有请求的 slot 序列按 `kv_indptr` 偏移拼接）和 `kv_indptr`（每请求起始偏移）。`create_flashinfer_kv_indices_triton`（`triton_ops/kv_indices.py:9`）把 `req_to_token` 转换为这种格式：
+
+```python
+@triton.jit
+def create_flashinfer_kv_indices_triton(
+    req_to_token_ptr,      # [max_batch, max_context_len]
+    req_pool_indices_ptr,  # [batch_size]
+    page_kernel_lens_ptr,  # [batch_size] 每个请求需要读的 token 数
+    kv_indptr,             # [batch_size+1] 累积偏移
+    kv_start_idx,          # [batch_size] optional，SWA 窗口的起始偏移
+    kv_indices_ptr,        # [total_tokens] 输出缓冲区
+    req_to_token_ptr_stride: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    req_pool_index = tl.load(req_pool_indices_ptr + pid)
+    kv_indices_offset = tl.load(kv_indptr + pid)       # 本请求在输出中的起始位
+    kv_start = tl.load(kv_start_idx + pid) if kv_start_idx else 0
+    kv_end = kv_start + tl.load(page_kernel_lens_ptr + pid)
+
+    for i in range(tl.cdiv(kv_end - kv_start, BLOCK_SIZE)):
+        offset = tl.arange(0, BLOCK_SIZE) + i * BLOCK_SIZE
+        mask = offset < kv_end - kv_start
+        data = tl.load(req_to_token_ptr + req_pool_index * req_to_token_ptr_stride
+                       + kv_start + offset, mask=mask)
+        tl.store(kv_indices_ptr + kv_indices_offset + offset, data, mask=mask)
+```
+
+每个请求一个 block，从 `req_to_token[req_pool_index, kv_start:kv_end]` 逐行拷贝到 `kv_indices` 的对应偏移段。`kv_start_idx` 可选参数支持 SWA 的"仅读取窗口内 KV"——SWA 混合模型下 full attention 层取全量 token，SWA 层只取 `kv_start_idx` 到末尾的窗口内 token。这个转换是 zero-copy 的——只拷贝 int32 索引（每 token 4 字节），不碰 KV 数据本身。
+
 ### 1.4 KV Cache 精细化元数据体系
+
+`Req` 对象（`schedule_batch.py:700`）承载了请求级 KV 管理的全部元数据，按功能分为四个维度。每个字段在 Prefill/Decode/释放/淘汰四个阶段被不同模块读写，构成 SGLang 请求状态机。
+
 - 1.4.1 请求维度：`kv_committed_len`、`kv_allocated_len`、`req_pool_idx`、`priority`、`time_stats`
+
+| 字段 | 类型 | 含义 | 读写时机 |
+|---|---|---|---|
+| `req_pool_idx` | `Optional[int]` | 在 `ReqToTokenPool.req_to_token` 中的行号（L788） | `alloc_req_slots` 分配，`release_kv_cache` 释放为 `None` |
+| `kv_committed_len` | `int` | 已确认提交的 KV token 数——即页表行中有效 slot 数的下界（L738） | decode 每步 +1；chunk 结束时累加本 chunk 新 token；`pop_committed_kv_cache` 读取后置 `kv_committed_freed=True` |
+| `kv_allocated_len` | `int` | 已分配的 KV token 数——包括尚未确认的 draft token slot（L739） | prefill 时 `= seq_len`；spec decode 时 `>= kv_committed_len`（含待验证 draft slots）；`pop_overallocated_kv_cache` 返回 `(committed, allocated)` 区间并把超出部分释放 |
+| `priority` | `Optional[int]` | 淘汰优先级，传给 `PriorityStrategy`（L820） | 请求创建时设定，insert 进树时作为 `TreeNode.priority` |
+| `time_stats` | `SchedulerReqTimeStats` | 全生命周期时间戳（L973） | 记录 queue/prefill/decode 各阶段耗时，用于可观测性 |
+
+`kv_allocated_len - kv_committed_len` 就是该请求的"悬空 slot"——spec decode 中已被分配但尚未验证的 draft token slot。`release_kv_cache`（`common.py:645`）先调 `cache_finished_req` 把已确认 KV 插树，再调 `pop_overallocated_kv_cache` 释放悬空 slot，最后 `req_to_token_pool.free(req)` 归还行号。这一"确认→插树→释放悬空→归还行号"的四段释放确保不会有内存泄漏。
+
 - 1.4.2 前缀缓存维度：`prefix_indices`、`num_matched_prefix_tokens`、`host_hit_length`、`cache_protected_len`
+
+| 字段 | 类型 | 含义 | 来源 |
+|---|---|---|---|
+| `prefix_indices` | `torch.Tensor[int64]` | 设备侧命中前缀对应的 KV slot 序列（L845） | `match_prefix` 返回的 `MatchResult.device_indices`；chunked prefill 时每次 `cache_unfinished_req` 后刷新 |
+| `last_node` | `Any` | 该请求当前持有锁的最深树节点（L847） | `match_prefix` 或 `insert` 返回的终止节点；用于 `inc_lock_ref` / `dec_lock_ref` 生命周期管理 |
+| `num_matched_prefix_tokens` | `int` | 总缓存命中 token 数（L858） | `= len(prefix_indices) + host_hit_length`，用于调度器按"未命中 token 数"排序 batch |
+| `host_hit_length` | `int` | L2 主机侧命中 token 数，HiCache 专用（L851） | `HiRadixCache.match_prefix` 返回的 `host_hit_length`；产生 `load_back` 操作从 CPU 回灌 GPU |
+| `cache_protected_len` | `int` | 已插入树且在树里受保护的前缀长度（L866） | `cache_unfinished_req` 更新（见第 2 章 L542）——`page_size>1` 时可能 < `len(prefix_indices)`，因为 partial page 的 slot 在页表里但未进树，需在后续 chunk/结束释放 |
+| `best_match_node` | `Any` | `match_prefix` 的完整匹配结果节点（L849） | 供 HiCache 的 `init_load_back` 锚定 load-back 来源 |
+
+`cache_protected_len` 是"防泄漏"的关键。`page_size>1` 下，partial page 尾部的 slot 被写入页表供 attention 读取，但由于长度不满足 page 对齐，不能插入 RadixTree——它们被记到 `cache_protected_len` 的额外尾部，在下一次 `cache_unfinished_req` 和最终 `cache_finished_req` 中释放（见 `radix_cache.py:538-542` 的注释）。这个机制防止"页表里引用了但树里没记录"的 slot 永远无法回收。
+
 - 1.4.3 SWA 维度：`swa_evicted_seqlen`、`sliding_window_size`
+
+`swa_evicted_seqlen`（L751）追踪 SWA 池中已被逻辑淘汰的 KV 长度。它在两类 cache 下的行为不同（见 L747-750 注释）：
+- **RadixCache**：`[cache_protected_len, swa_evicted_seqlen)` 的 KV 由 `ScheduleBatch.maybe_evict_swa` 手动释放；`[0, cache_protected_len)` 由 radix cache 淘汰时释放。
+- **ChunkCache**：`[0, swa_evicted_seqlen)` 全部由 `maybe_evict_swa` 手动释放。
+
+`free_swa_out_of_window_slots`（`common.py:68`）计算窗口外应淘汰量：`evict_threshold = pre_len - sliding_window_size - page_size`（保留至少一页 margin 供树存储非 tombstone 节点，L95），然后从 `req_to_token[req_pool_idx, swa_evicted_seqlen:new_swa_evicted_seqlen]` 取出 slot 调 `allocator.free_swa` 释放。SWA 池**只释放 slot 映射、不修改页表**（页表仍保留完整 slot 序列供 full attention 层读取），这是通过 `kv_start_idx` 在 flashinfer 转换 kernel 中裁剪窗口实现（1.3.4 节）。
+
 - 1.4.4 生命周期维度：`kv_committed_freed`、`kv_overallocated_freed`、`inflight_middle_chunks`
+
+| 字段 | 含义 | 保护机制 |
+|---|---|---|
+| `kv_committed_freed`（L740） | 已确认 KV 是否已释放 | `pop_committed_kv_cache` 断言 `kv_committed_freed` 为 False，释放后置 True——**防重复释放** |
+| `kv_overallocated_freed`（L741） | 悬空 KV 是否已释放 | `pop_overallocated_kv_cache` 同理；spec decode 路径允许 committed < allocated，非 spec 路径断言二者相等（L677） |
+| `inflight_middle_chunks`（L871） | chunked prefill 中的未完成 chunk 数 | 每新增一个 chunk +1，每处理完成一个 chunk -1；调度器据此判断"该请求还有未完成的 chunk，不能释放页表行" |
+| `is_retracted` / `retracted_stain`（L874-876） | 请求是否被 retract（回退）/ 是否曾被 retract | retract 时把已分配但未确认的 decode slot 释放，`retracted_stain` 标记历史上被 retract 过，影响 scheduling priority |
+| `extend_batch_idx` / `decode_batch_idx`（L754-755） | 当前 batch 中的索引 | overlap scheduler 用 `decode_batch_idx >= 1` 判断 decode 是否已脱离 extend 阶段，决定何时可以 evict SWA（`maybe_evict_swa` L2881）
 
 ### 1.5 Chunked Prefill：长文本分段与 `req_pool_idx` 复用机制
 
+Chunked prefill 把长 prompt 按 `chunked_prefill_size`（`CacheInitParams` 中的参数，`cache_init_params.py:44`）切成多个 chunk 分批次 prefill，核心价值是避免单条长 prompt 阻塞调度、牺牲 TTFT。
+
+**`req_pool_idx` 复用是 chunked prefill 的关键设计**。同一请求跨多 chunk 保持同一个 `req_pool_idx`（页表行），各 chunk 往同一页表行**追加写入**新 token 的 slot 映射：
+
+```
+Chunk 1: req_to_token[3, 0:1024]   ← prefix match 命中 800 token + 新分配 224 slot
+Chunk 2: req_to_token[3, 1024:2048]← prefix match 命中 1024 token（含 Chunk1 已算）+ 新分配 1024 slot
+Chunk 3: req_to_token[3, 2048:3072]← 同上，最终 seq_len = 第 1 章整体 extend 的长度
+```
+
+`ReqToTokenPool.alloc`（`memory_pool.py:270`）的第一行逻辑就是复用检测：
+
+```python
+def alloc(self, reqs: list[Req]) -> Optional[List[int]]:
+    reusing = [i for i, r in enumerate(reqs) if r.req_pool_idx is not None]
+    assert all(
+        reqs[i].inflight_middle_chunks > 0 or reqs[i].kv_committed_len > 0
+        for i in reusing
+    ), "reusing request must be chunked or have committed KV"
+    need_size = len(reqs) - len(reusing)
+    ...
+```
+
+复用条件严格约束：`inflight_middle_chunks > 0`（中间 chunk，还有后续）或 `kv_committed_len > 0`（至少已有部分 KV 已落盘）——不允许空请求复用已分配的行号。
+
+**chunk 间的 KV 持久化**：每 chunk 结束后调 `cache_unfinished_req`（`radix_cache.py:493`），把本 chunk 新算的 KV slot 插入 RadixTree 使之能被后续 chunk（或其他请求）命中。关键流程（已在第 2 章阐述，此处聚焦 chunked 视角）：
+
+1. `cache_unfinished_req` 插入新 KV 到树 → 树返回更新后的 `new_indices`
+2. `self.req_to_token_pool.write(...)` 把页表行中受保护段刷新为树返回的新 slot 映射（`radix_cache.py:533`）
+3. `req.cache_protected_len = len(new_indices)` 更新受保护长度
+4. `req.prefix_indices` 设为 `new_indices + 未进树的 tail`（`radix_cache.py:550-554`）
+5. `inc_lock_ref(new_last_node)` 锁住新节点，`dec_lock_ref(req.last_node)` 释放旧节点
+
+**Chunk 间交互的 `inflight_middle_chunks`**：每切一个新 chunk +1，每处理完一个 chunk -1。当 `inflight_middle_chunks == 0` 时该 chunk 是最后一个——此时 `cache_finished_req`（而非 `cache_unfinished_req`）被调用，把最终 KV 完整插树并释放行号。
+
+Chunked prefill 的额外收益是**与其他请求的 batching**：调度器可以把多个请求的不同 chunk 混编进同一个 prefill batch，长 prompt 的中间 chunk 和短 prompt 的第一个 chunk 共享 GPU forward，提高 batch 利用率。
+
 ### 1.6 工程踩坑与源码细节
+
 - 1.6.1 `_alloc_size = size + 1`：索引 0 的 CUDA graph padding 约定
+
+`ReqToTokenPool` 的 `_alloc_size = size + 1`（`memory_pool.py:244`），`free_slots` 从 1 开始（`list(range(1, _alloc_size))`），索引 0 永远不被分配。`TokenToKVPoolAllocator` 同样：`free_pages = torch.arange(1, size + 1)`（`allocator/token.py:44`），slot 0 永远空闲。约定被多处依赖：
+
+- **CUDA graph padding**：CUDA graph 的 batch 大小固定，但实际请求数可能不足——padded 空请求的 `req_pool_indices` 被填 0，attention kernel 读 `req_to_token[0, *]`（全零行），写 KV 也落在 slot 0（dummy 位置），不污染真实请求数据。
+- **KV Canary 显式引用**：`jit_kernel/kv_canary/consts.py:8` 注释 `# Mirrors SGLang's ReqToTokenPool contract: req_pool_idx 0 is the CUDA-graph padding row`——外部工具也遵循此约定。
+- **`maybe_detect_oob` 越界检测**（`memory_pool.py` 的 `set_kv_buffer` / `move_kv_cache`）：范围 check 上限是 `size + page_size`（不是 `size`），因为 `page_size` 个 padding slot 在多 page_size 场景还要额外容纳 page 对齐的空余。`loc == 0` 的写入永远合法——它是 padding slot。
+
+这个约定让 CUDA graph 的 padded batch 与真实 KV 管理完全解耦——padding 请求不需要任何 `ReqToTokenPool` / `TokenToKVPoolAllocator` 分配，也不需要额外的 `if is_padding` 判断。
+
 - 1.6.2 `need_sort` 与 `merge_and_sort_free`：碎片整理时机选择
+
+`BaseTokenToKVPoolAllocator.need_sort`（`allocator/base.py:49`）控制 slot 释放策略：
+
+```python
+self.need_sort = need_sort          # 是否需要排序
+self.free_pages = None              # 可用 slot 池（GPU int64 tensor）
+self.release_pages = None           # 延迟释放队列
+self.free_group = []                # 批量释放暂存
+self.is_not_in_free_group = True
+```
+
+两阶段释放（`allocator/token.py:66`）：
+
+```python
+def free(self, free_index):
+    if free_index.numel() == 0: return
+    if self.is_not_in_free_group:
+        if self.need_sort:
+            self.release_pages = torch.cat((self.release_pages, free_index))  # 延迟
+        else:
+            self.free_pages = torch.cat((self.free_pages, free_index))         # 直接追加
+    else:
+        self.free_group.append(free_index)                                     # 攒批
+```
+
+两种模式的选择逻辑：
+- **`need_sort=True`**（默认，前缀缓存命中率高的场景）：释放的 slot 先放进 `release_pages` 延迟队列，**只在 `alloc` 发现 `need_size > len(free_pages)` 时才执行** `merge_and_sort_free()`——把 `free_pages` 与 `release_pages` 合并后 `torch.sort`。排序保证大块连续分配、减少碎片。
+- **`need_sort=False`**（命中率低、释放频繁的场景）：直接 `cat` 到 `free_pages` 尾部，免排序开销。
+
+为什么延迟排序更优？前缀缓存被大量请求共享时，树节点淘汰不是逐 token、而是整段 slot 一起 free——这些释放是**批量的而且位置随机**。如果不排序，`free_pages` 很快变成乱序片段，大段 extend 分配时要在碎片化的空闲 set 中反复跳过。排序一次的成本 O(n log n) 远低于 n 次碎片化分配中每步扫描的隐性开销。延迟则把多个小释放攒成一次排序，摊还掉频繁 sort 的峰值 GPU/CPU 同步延迟。
+
+批量释放 API `free_group_begin` / `free_group_end`（`base.py:69`）用于同一 batch 内释放多个请求 KV 的场景——先把所有 `free_index` 收集到 `self.free_group`，最后一次性 `torch.cat + free`，减少 `torch.cat` 调用次数（每次 cat 都是 GPU memory allocator 开销）。
 
 ## 第2章 SGLang RadixCache 基数树：全局前缀 KV 共享核心
 
@@ -2136,6 +2360,3 @@ SGLang 在 PagedAttention 的物理分页之上构建了 RadixTree 前缀共享�
 | `PagedTokenToKVPoolAllocator` | `allocator/paged.py:105` | per-page (page_size>1) | alloc/alloc_extend/alloc_decode 三段填充，free 去重 |
 | `SWATokenToKVPoolAllocator` | `allocator/swa.py:20` | per-token HW | 组合 full+swa 两套 allocator，full_to_swa_index_mapping |
 | `HiSparseTokenToKVPoolAllocator` | `allocator/hisparse.py:15` | 主/辅双池 | 主池全量+辅助池高贡献 KV，双 allocator 同步 |
-
-
-
