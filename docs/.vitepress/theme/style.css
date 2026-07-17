@@ -177,11 +177,16 @@
 }
 
 /* ========== 侧边栏 ========== */
+:root {
+  --vp-sidebar-width: 240px;
+}
+
 .VPSidebar {
   border-right: 1px solid var(--vp-c-divider);
   transition: width 0.3s cubic-bezier(0.25, 0.8, 0.25, 1.2),
               opacity 0.25s ease,
               transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1.2);
+  width: var(--vp-sidebar-width) !important;
 }
 
 /* ========== 侧边栏折叠按钮 ========== */
