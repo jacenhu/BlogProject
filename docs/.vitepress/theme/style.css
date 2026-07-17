@@ -179,6 +179,100 @@
 /* ========== 侧边栏 ========== */
 .VPSidebar {
   border-right: 1px solid var(--vp-c-divider);
+  transition: width 0.3s cubic-bezier(0.25, 0.8, 0.25, 1.2),
+              opacity 0.25s ease,
+              transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1.2);
+}
+
+/* ========== 侧边栏折叠按钮 ========== */
+.sidebar-toggle-btn {
+  position: fixed;
+  left: calc(var(--vp-sidebar-width, 272px) - 1px);
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 100;
+  width: 26px;
+  height: 48px;
+  border-radius: 0 12px 12px 0;
+  border: 1px solid var(--vp-c-divider);
+  border-left: none;
+  background: var(--vp-c-bg);
+  color: var(--vp-c-text-2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-shadow: 1px 0 4px rgba(0, 0, 0, 0.06);
+  transition: left 0.3s cubic-bezier(0.25, 0.8, 0.25, 1.2),
+              color 0.2s ease,
+              background 0.2s ease,
+              box-shadow 0.2s ease,
+              opacity 0.2s ease;
+  opacity: 0.25;
+}
+
+/* 悬停时完全显示 */
+.sidebar-toggle-btn:hover {
+  opacity: 1;
+  color: var(--vp-c-brand-1);
+  border-color: var(--vp-c-divider);
+  box-shadow: 1px 0 8px rgba(0, 113, 227, 0.15);
+}
+
+/* 左侧边缘悬浮热区：鼠标靠近左边缘时显示按钮（折叠后使用） */
+.sidebar-hover-zone {
+  position: fixed;
+  left: 0;
+  top: var(--vp-nav-height, 64px);
+  bottom: 0;
+  width: 20px;
+  z-index: 99;
+}
+
+.sidebar-hover-zone:hover ~ .sidebar-toggle-btn {
+  opacity: 1;
+}
+
+/* 移动端隐藏折叠按钮（VitePress 自带 hamburger） */
+@media (max-width: 959px) {
+  .sidebar-toggle-btn,
+  .sidebar-hover-zone {
+    display: none !important;
+  }
+}
+
+/* 折叠状态下按钮贴在左边缘 */
+.sidebar-collapsed .sidebar-toggle-btn {
+  left: 0;
+  opacity: 1;
+  transform: translate(0, -50%);
+  border-radius: 0 12px 12px 0;
+  border-left: none;
+}
+
+/* ========== 侧边栏折叠状态 ========== */
+.sidebar-collapsed .VPSidebar {
+  width: 0 !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  overflow: hidden;
+  border-right: none;
+}
+
+.sidebar-collapsed .VPSidebar > * {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebar-collapsed .VPContent {
+  padding-left: 0 !important;
+}
+
+@media (min-width: 960px) {
+  .sidebar-collapsed .VPContent {
+    padding-left: 0 !important;
+  }
 }
 
 /* 组标题 */
