@@ -142,7 +142,7 @@ TokenToKVPoolAllocator   ← 分配层：物理 slot 的分配/释放/碎片整�
 KVCache                  ← 物理层：GPU 上真实的 K/V 张量
 ```
 
-源码位于 `python/sglang/srt/mem_cache/memory_pool.py:235-302`，总共不到 70 行。
+源码位于 `python/sglang/srt/mem_cache/memory_pool.py:242-310`，总共不到 70 行。
 
 ---
 
@@ -691,12 +691,12 @@ class KVCache(abc.ABC):
 张量布局（每层一对独立 K/V buffer，共 `layer_num` 对）：
 
 ```python
-# 默认 NHD 布局（L1488）
+# 默认 NHD 布局（L1516）
 self.k_buffer[i] = torch.zeros(size + page_size, head_num, head_dim)       # [token, head, dim]
 self.v_buffer[i] = torch.zeros(size + page_size, head_num, v_head_dim)     # 支持 K/V 维度不等
 ```
 
-可选 AITER 5D SHUFFLE 布局（仅 ROCm AITER，`SGLANG_AITER_KV_CACHE_LAYOUT=vectorized_5d`，L1343-1372）：
+可选 AITER 5D SHUFFLE 布局（仅 ROCm AITER，`SGLANG_AITER_KV_CACHE_LAYOUT=vectorized_5d`，L1362-1372）：
 
 ```
 K: (num_blocks, H, D_k // X, page, X)
@@ -884,7 +884,7 @@ RadixCache 的前缀共享、引用计数、淘汰策略，操作的全是"slot 
 | 索引 slot 复用 | 分配层 | `free_pages` 回收，下次 `alloc` 再切出 |
 | 请求映射回收 | 逻辑层 | `ReqToTokenPool.free(req)` 归还行号 |
 
-计算路径只依赖 `loc`，传输路径只改 `KVCache` 内部张量数据或 `allocator` 的空闲集合，二者在 forward 路径上天然解耦——这才有 alt_stream 异步写 KV（L1758）与 attention 计算重叠的可能。
+计算路径只依赖 `loc`，传输路径只改 `KVCache` 内部张量数据或 `allocator` 的空闲集合，二者在 forward 路径上天然解耦——这才有 alt_stream 异步写 KV（L1781）与 attention 计算重叠的可能。
 
 ---
 
@@ -896,7 +896,7 @@ RadixCache 的前缀共享、引用计数、淘汰策略，操作的全是"slot 
 
 - 1.3.1 `page_size=1`：per-token 粒度的 slot 映射
 
-默认 `page_size=1`（大多数 MHA 模型）下，`req_to_token` 是一张 `[max_batch, max_context_len]` 的 `int32` GPU 张量。其创建逻辑在 `ReqToTokenPool.__init__`（`memory_pool.py:244`）：
+默认 `page_size=1`（大多数 MHA 模型）下，`req_to_token` 是一张 `[max_batch, max_context_len]` 的 `int32` GPU 张量。其创建逻辑在 `ReqToTokenPool.__init__`（`memory_pool.py:247`）：
 
 ```python
 self.req_to_token = torch.zeros(
@@ -1011,21 +1011,21 @@ def create_flashinfer_kv_indices_triton(
 
 | 字段 | 类型 | 一句话含义 |
 |---|---|---|
-| `req_pool_idx` | `Optional[int]` | 在 `ReqToTokenPool.req_to_token` 中的行号（L788） |
-| `kv_committed_len` | `int` | 已确认提交的 KV token 数——页表行中有效 slot 的下界（L738） |
-| `kv_allocated_len` | `int` | 已分配的 KV token 数——含尚未确认的 draft token slot（L739） |
+| `req_pool_idx` | `Optional[int]` | 在 `ReqToTokenPool.req_to_token` 中的行号（L793） |
+| `kv_committed_len` | `int` | 已确认提交的 KV token 数——页表行中有效 slot 的下界（L740） |
+| `kv_allocated_len` | `int` | 已分配的 KV token 数——含尚未确认的 draft token slot（L741） |
 | `priority` | `Optional[int]` | 淘汰优先级（L820），insert 进树时作为 `TreeNode.priority` |
-| `time_stats` | `SchedulerReqTimeStats` | 全生命周期时间戳（L973），记录 queue/prefill/decode 耗时 |
+| `time_stats` | `SchedulerReqTimeStats` | 全生命周期时间戳（L979），记录 queue/prefill/decode 耗时 |
 
 各字段的读写时序：
 
 **`req_pool_idx`** — `alloc_req_slots`（`common.py:401`）从 `ReqToTokenPool.free_slots` 分配，`release_kv_cache`（`common.py:635`）末尾调 `req_to_token_pool.free(req)` 归还为 `None`。同一请求的 chunked prefill 跨多 chunk 复用同一个 `req_pool_idx`（第 1.5 节）。
 
-**`kv_committed_len`** — decode 每步 +1（每确认一个 output token）；chunk 结束时累加本 chunk 的新 token 数。`pop_committed_kv_cache`（`schedule_batch.py:1057`）读出并置 `kv_committed_freed=True` 防重复释放。
+**`kv_committed_len`** — decode 每步 +1（每确认一个 output token）；chunk 结束时累加本 chunk 的新 token 数。`pop_committed_kv_cache`（`schedule_batch.py:1060`）读出并置 `kv_committed_freed=True` 防重复释放。
 
-**`kv_allocated_len`** — prefill 时 `= seq_len`（整段 extend 一次性分配）；spec decode 时 `>= kv_committed_len`（含待验证 draft token 的 slot）。`pop_overallocated_kv_cache`（`schedule_batch.py:1069`）返回 `(committed, allocated)` 区间，`release_kv_cache` 把超出部分 `allocator.free`。
+**`kv_allocated_len`** — prefill 时 `= seq_len`（整段 extend 一次性分配）；spec decode 时 `>= kv_committed_len`（含待验证 draft token 的 slot）。`pop_overallocated_kv_cache`（`schedule_batch.py:1068`）返回 `(committed, allocated)` 区间，`release_kv_cache` 把超出部分 `allocator.free`。
 
-**`priority`** — 请求创建时从 `sampling_params` 传入，`cache_finished_req` 的 `insert` 将其写入 `TreeNode.priority`，沿路径 `max` 传播（`radix_cache.py:723`）。`PriorityStrategy` 淘汰时 `(priority, last_access_time)` 元组决定逐出顺序。
+**`priority`** — 请求创建时从 `sampling_params` 传入，`cache_finished_req` 的 `insert` 将其写入 `TreeNode.priority`，沿路径 `max` 传播（`radix_cache.py:718`）。`PriorityStrategy` 淘汰时 `(priority, last_access_time)` 元组决定逐出顺序。
 
 **`time_stats`** — `SchedulerReqTimeStats` 对象在 `Req.__init__` 创建时打 `scheduler_recv_time`，后续各阶段（queue/prefill/decode/finish）打点，供 metrics 和 debug 用。
 
@@ -1058,7 +1058,7 @@ def create_flashinfer_kv_indices_triton(
 
 **`best_match_node`** — 供 HiCache 的 `init_load_back` 锚定 load-back 来源节点。
 
-`cache_protected_len` 是"防泄漏"的关键。`page_size>1` 下，partial page 尾部的 slot 被写入页表供 attention 读取，但由于长度不满足 page 对齐，不能插入 RadixTree——它们被记到 `cache_protected_len` 的额外尾部，在下一次 `cache_unfinished_req` 和最终 `cache_finished_req` 中释放（见 `radix_cache.py:538-542` 的注释）。这个机制防止"页表里引用了但树里没记录"的 slot 永远无法回收。
+`cache_protected_len` 是"防泄漏"的关键。`page_size>1` 下，partial page 尾部的 slot 被写入页表供 attention 读取，但由于长度不满足 page 对齐，不能插入 RadixTree——它们被记到 `cache_protected_len` 的额外尾部，在下一次 `cache_unfinished_req` 和最终 `cache_finished_req` 中释放（见 `radix_cache.py:533-537` 的注释）。这个机制防止"页表里引用了但树里没记录"的 slot 永远无法回收。
 
 - 1.4.3 SWA 维度：`swa_evicted_seqlen`、`sliding_window_size`
 
@@ -1076,11 +1076,11 @@ def create_flashinfer_kv_indices_triton(
 | `kv_overallocated_freed`（L741） | 悬空 KV 是否已释放 | `pop_overallocated_kv_cache` 同理；spec decode 路径允许 committed < allocated，非 spec 路径断言二者相等（L677） |
 | `inflight_middle_chunks`（L871） | chunked prefill 中的未完成 chunk 数 | 每新增一个 chunk +1，每处理完成一个 chunk -1；调度器据此判断"该请求还有未完成的 chunk，不能释放页表行" |
 | `is_retracted` / `retracted_stain`（L874-876） | 请求是否被 retract（回退）/ 是否曾被 retract | retract 时把已分配但未确认的 decode slot 释放，`retracted_stain` 标记历史上被 retract 过，影响 scheduling priority |
-| `extend_batch_idx` / `decode_batch_idx`（L754-755） | 当前 batch 中的索引 | overlap scheduler 用 `decode_batch_idx >= 1` 判断 decode 是否已脱离 extend 阶段，决定何时可以 evict SWA（`maybe_evict_swa` L2881）
+| `extend_batch_idx` / `decode_batch_idx`（L754-755） | 当前 batch 中的索引 | overlap scheduler 用 `decode_batch_idx >= 1` 判断 decode 是否已脱离 extend 阶段，决定何时可以 evict SWA（`maybe_evict_swa` (`schedule_batch.py:2864`)）
 
 ### 1.5 Chunked Prefill：长文本分段与 `req_pool_idx` 复用机制
 
-Chunked prefill 把长 prompt 按 `chunked_prefill_size`（`CacheInitParams` 中的参数，`cache_init_params.py:44`）切成多个 chunk 分批次 prefill，核心价值是避免单条长 prompt 阻塞调度、牺牲 TTFT。
+Chunked prefill 把长 prompt 按 `chunked_prefill_size`（`CacheInitParams` 中的参数，`cache_init_params.py:45`）切成多个 chunk 分批次 prefill，核心价值是避免单条长 prompt 阻塞调度、牺牲 TTFT。
 
 **`req_pool_idx` 复用是 chunked prefill 的关键设计**。同一请求跨多 chunk 保持同一个 `req_pool_idx`（页表行），各 chunk 往同一页表行**追加写入**新 token 的 slot 映射：
 
@@ -1110,7 +1110,7 @@ def alloc(self, reqs: list[Req]) -> Optional[List[int]]:
 1. `cache_unfinished_req` 插入新 KV 到树 → 树返回更新后的 `new_indices`
 2. `self.req_to_token_pool.write(...)` 把页表行中受保护段刷新为树返回的新 slot 映射（`radix_cache.py:533`）
 3. `req.cache_protected_len = len(new_indices)` 更新受保护长度
-4. `req.prefix_indices` 设为 `new_indices + 未进树的 tail`（`radix_cache.py:550-554`）
+4. `req.prefix_indices` 设为 `new_indices + 未进树的 tail`（`radix_cache.py:545-550`）
 5. `inc_lock_ref(new_last_node)` 锁住新节点，`dec_lock_ref(req.last_node)` 释放旧节点
 
 **Chunk 间交互的 `inflight_middle_chunks`**：每切一个新 chunk +1，每处理完一个 chunk -1。当 `inflight_middle_chunks == 0` 时该 chunk 是最后一个——此时 `cache_finished_req`（而非 `cache_unfinished_req`）被调用，把最终 KV 完整插树并释放行号。
@@ -1121,7 +1121,7 @@ Chunked prefill 的额外收益是**与其他请求的 batching**：调度器可
 
 - 1.6.1 `_alloc_size = size + 1`：索引 0 的 CUDA graph padding 约定
 
-**为什么需要 padding**：CUDA graph 捕获后 batch 大小固化。若图捕获时 batch=256，某轮实际只有 200 个请求，不补 56 个空位则 kernel 的 grid/block 对不上——图 replay 时输入张量 shape 必须和捕获时完全一致。`_pad_tensor_to_size`（`forward_batch_info.py:1112`）在尾部用 0 补齐：
+**为什么需要 padding**：CUDA graph 捕获后 batch 大小固化。若图捕获时 batch=256，某轮实际只有 200 个请求，不补 56 个空位则 kernel 的 grid/block 对不上——图 replay 时输入张量 shape 必须和捕获时完全一致。`_pad_tensor_to_size`（`forward_batch_info.py:1115`）在尾部用 0 补齐：
 
 ```python
 def _pad_tensor_to_size(self, tensor, size, *, value=0):
@@ -1134,7 +1134,7 @@ self.req_pool_indices = self._pad_tensor_to_size(self.req_pool_indices, bs)
 
 **两道门互锁保证 padding 和数据区隔离**：
 
-逻辑层（页表）：`ReqToTokenPool` 的 `_alloc_size = size + 1`（`memory_pool.py:244`），`free_slots = list(range(1, _alloc_size))`，索引 0 永远不被分配。`req_to_token[0, :]` 全零初始化后从未被 `write_cache_indices` 覆盖——没有任何真实请求能拿到 `req_pool_idx = 0`。
+逻辑层（页表）：`ReqToTokenPool` 的 `_alloc_size = size + 1`（`memory_pool.py:247`），`free_slots = list(range(1, _alloc_size))`，索引 0 永远不被分配。`req_to_token[0, :]` 全零初始化后从未被 `write_cache_indices` 覆盖——没有任何真实请求能拿到 `req_pool_idx = 0`。
 
 物理层（显存）：`TokenToKVPoolAllocator` 的 `free_pages = torch.arange(1, size + 1)`（`allocator/token.py:44`），slot 0 永远不在空闲池。`alloc()` 绝不返回 slot 0。`set_kv_buffer` 被真实请求调用时 `loc` 绝不可能是 0。
 
@@ -1216,10 +1216,10 @@ vLLM 的 PagedAttention 解决的是**单请求内部**的显存碎片化：把�
 |---|---|---|
 | `BasePrefixCache` | `base_prefix_cache.py:211` | 抽象基类，实现 `PrefixCacheTrait` 协议 |
 | `RadixCache` | `radix_cache.py:280` | 基础基数树，GPU 单级 KV 共享 |
-| `HiRadixCache` | `hiradix_cache.py:75` | 继承 `RadixCache`，叠加 L2/L3 多级存储（HostKVCache + storage backend） |
+| `HiRadixCache` | `hiradix_cache.py:76` | 继承 `RadixCache`，叠加 L2/L3 多级存储（HostKVCache + storage backend） |
 | `UnifiedRadixCache` | `unified_radix_cache.py:305` | SSM(Mamba) + Attention 混合模型统一缓存 |
 | `SWARadixCache` | `swa_radix_cache.py:343` | 滑动窗口注意力，维护 SWA 尾部 + 全量双池 |
-| `MambaRadixCache` | `mamba_radix_cache.py:421` | Mamba/SSM 状态缓存 |
+| `MambaRadixCache` | `mamba_radix_cache.py:424` | Mamba/SSM 状态缓存 |
 | `HiMambaRadixCache` | `hi_mamba_radix_cache.py:97` | Mamba + HiCache 多级 |
 | `ChunkCache` / `SWAChunkCache` | `chunk_cache.py:35`/`113` | chunked prefill 用的轻量缓存 |
 | `SessionRadixCacheMixin` | `session_radix_cache.py:23` | 会话级缓存复用，作为 mixin 混入 `RadixCache` |
@@ -1230,7 +1230,7 @@ vLLM 的 PagedAttention 解决的是**单请求内部**的显存碎片化：把�
 
 - 2.2.2 `HiRadixCache`（带 HiCache 多级存储的基数树）
 
-直接继承 `RadixCache`（`hiradix_cache.py:75`），在其基础上装配 `HostKVCache`（L2）和可选的 storage backend（L3）。它引入 `host_value` / `host_ref_counter` / `write_through_pending_id` 等主机侧字段，并托管 `HiCacheController` 做 write-through / write-back / load-back 调度。`write_through_threshold`（write_through=1，其余=2）和 `load_back_threshold=10` 控制下沉/回灌触发点。详见第 10 章。
+直接继承 `RadixCache`（`hiradix_cache.py:76`），在其基础上装配 `HostKVCache`（L2）和可选的 storage backend（L3）。它引入 `host_value` / `host_ref_counter` / `write_through_pending_id` 等主机侧字段，并托管 `HiCacheController` 做 write-through / write-back / load-back 调度。`write_through_threshold`（write_through=1，其余=2）和 `load_back_threshold=10` 控制下沉/回灌触发点。详见第 10 章。
 
 - 2.2.3 `UnifiedRadixCache`（统一混合模型缓存，SSM + Attention）
 
@@ -1282,7 +1282,7 @@ is_bigram=True:  token_ids = [A, B, C, D, E]  ← 相同 5 个 raw token → 4 �
                   相邻 bigram 共享中间的 boundary token
 ```
 
-物理上 token_ids 数组完全不变——`maybe_to_bigram_view`（`radix_cache.py:139`）只翻 `self.is_bigram = True` 一个布尔位，O(1) 切换。`__len__` 在 bigram 模式下返回 `n-1`（5 个 raw → 4 个 key），`__iter__` yield `(t[i], t[i+1])` 对，`__getitem__` 切片时 raw 比 bigram 多取 1 个（切片 `[start:stop]` 的 bigram 需要 `token_ids[start:stop+1]` 的 raw token）。`match()` 中 bigram 匹配的 raw token 数比 bigram 数多 1。
+物理上 token_ids 数组完全不变——`maybe_to_bigram_view`（`radix_cache.py:142`）只翻 `self.is_bigram = True` 一个布尔位，O(1) 切换。`__len__` 在 bigram 模式下返回 `n-1`（5 个 raw → 4 个 key），`__iter__` yield `(t[i], t[i+1])` 对，`__getitem__` 切片时 raw 比 bigram 多取 1 个（切片 `[start:stop]` 的 bigram 需要 `token_ids[start:stop+1]` 的 raw token）。`match()` 中 bigram 匹配的 raw token 数比 bigram 数多 1。
 
 调用方（`match_prefix`、`insert`）在 EAGLE 模式下先调 `maybe_to_bigram_view` 翻标志位再走正常的匹配/插入流程——底层 `match`、`child_key`、`__len__` 自动按 `is_bigram` 选择正确的解读方式，上层代码不变。
 
@@ -1564,7 +1564,7 @@ class PrefixCacheTrait(Protocol):
 
 - 2.7.1 `IncLockRefResult` / `DecLockRefParams`：引用计数增减 API
 
-`inc_lock_ref`（`radix_cache.py:592`）从某节点**沿父指针一路加到根**，`dec_lock_ref`（L612）对称地一路减：
+`inc_lock_ref`（`radix_cache.py:592`）从某节点**沿父指针一路加到根**，`dec_lock_ref`（L607）对称地一路减：
 
 ```python
 def inc_lock_ref(self, node):
@@ -1769,7 +1769,7 @@ def alloc_for_extend(batch):
     return out_cache_loc, req_pool_indices_device, req_pool_indices_cpu
 ```
 
-三步对应三层：①`ReqToTokenPool.alloc`（逻辑层行号）→ ②`allocator.alloc`（分配层 slot）→ ③`write_cache_indices`（写页表）。`alloc_token_slots`（L272）内部先 `evict_from_tree_cache` 把树缓存淘汰到腾出足够空闲，再 `allocator.alloc(num_tokens)`，`None` 则抛 `Out of memory`。
+三步对应三层：①`ReqToTokenPool.alloc`（逻辑层行号）→ ②`allocator.alloc`（分配层 slot）→ ③`write_cache_indices`（写页表）。`alloc_token_slots`（L269）内部先 `evict_from_tree_cache` 把树缓存淘汰到腾出足够空闲，再 `allocator.alloc(num_tokens)`，`None` 则抛 `Out of memory`。
 
 `write_cache_indices`（`common.py:124`）支持两条路径：attention backend 支持 triton 时用 `write_req_to_token_pool_triton` kernel 一次性批量写入（把每个请求的 `prefix_tensors[i]` 指针表上送 GPU），否则循环 `req_to_token_pool.write` 逐请求写——前者写 `[req_idx, 0:prefix_len]` = prefix slot、`[req_idx, prefix_len:seq_len]` = 新分配的 extend slot。
 
@@ -1824,7 +1824,7 @@ self.k_buffer = [
 ]
 ```
 
-`memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE)`（L1221）套一层，在 memory saver 启用时为这批 `torch.zeros` 分配特定显存池分块。分配后的 `k_buffer`/`v_buffer`/`kv_buffer` 张量在整个服务生命周期中不动——**永远不 grow、不 shrink、不 realloc**。
+`memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE)`（L1216）套一层，在 memory saver 启用时为这批 `torch.zeros` 分配特定显存池分块。分配后的 `k_buffer`/`v_buffer`/`kv_buffer` 张量在整个服务生命周期中不动——**永远不 grow、不 shrink、不 realloc**。
 
 **请求级惰性**：
 
@@ -2048,23 +2048,37 @@ SGLang 已有完整的 DSA 物理池（`DSATokenToKVPool`）+ 索引读写 API�
 
 - 4.1.1 `KVWriteLoc`：full pool + SWA pool 的二元写入目标
 
-`KVWriteLoc`（`memory_pool.py:1149`）是一个打包结构，把"完整 pool 的写位置"和"SWA pool 的预翻译位置"绑在一起：
+`KVWriteLoc`（`memory_pool.py:1149`）是一个打包结构，把三种池的写位置绑在一起：
 
 ```python
 class KVWriteLoc:
     """Write target(s) for KVCache.set_kv_buffer.
-    loc is the full-pool write location; swa_loc is the pre-translated
-    full->SWA location for hybrid SWA pools (None otherwise)."""
+    - loc:      通用的 per-token 写入位置（分配的 out_cache_loc），
+                unified memory pool 下为虚拟 slot 索引，非 unified 下为物理索引
+    - swa_loc:  SWA sub-pool 的预翻译物理位置（Hybrid SWA 池时非空）
+    - full_loc: full-attention sub-pool 的预翻译物理位置（unified memory pool 时非空）"""
     loc: torch.Tensor
     swa_loc: Optional[torch.Tensor] = None
+    full_loc: Optional[torch.Tensor] = None
 
 def unwrap_write_loc(loc_info):
+    """Return (loc, swa_loc, full_loc) from a KVWriteLoc or a bare loc."""
     if isinstance(loc_info, KVWriteLoc):
-        return loc_info.loc, loc_info.swa_loc
-    return loc_info, None
+        return loc_info.loc, loc_info.swa_loc, loc_info.full_loc
+    return loc_info, None, None
 ```
 
-普通模型 backend 只传一个裸 `loc` tensor；Hybrid SWA 模型（`SWATokenToKVPoolAllocator`，第 1 章 1.2.2）的 full pool 和 SWA pool 是两个独立物理池，slot 索引不通用，backend 需要同时知道"写到 full 池哪"和"写到 SWA 池哪"。`KVWriteLoc` 让 backend 无论什么池类型都只发一次 `set_kv_buffer` 调用，由 `unwrap_write_loc`（L971）拆成 `(loc, swa_loc)`——后者交由 `SWAKVPool` 的写入路径处理。这是"二元写入目标"的设计意图：对调用方屏蔽池类型差异。
+`__post_init__`（L1174）自动处理 piecewise/DP-padded 路径下 `loc` 被截断的情况：`swa_loc` 和 `full_loc` 预解析后在 metadata init 时计算一次，若后续 `loc` 被截断则同步切片。
+
+三种字段的使用场景：
+
+| 字段 | 何时非空 | 写入目标 |
+|---|---|---|
+| `loc` | 始终 | 通用池（普通模型即物理池，unified pool 时为虚拟索引） |
+| `swa_loc` | Hybrid SWA 模型 | SWA sub-pool 的物理 slot |
+| `full_loc` | Unified memory pool 模型 | Full-attention sub-pool 的物理 slot |
+
+普通模型 backend 只传一个裸 `loc` tensor；Hybrid SWA 模型同时传 `swa_loc`；Unified memory pool 模型同时传 `full_loc`。`KVWriteLoc` 让 backend 无论什么池类型都只发一次 `set_kv_buffer` 调用，由 `unwrap_write_loc`（L1184）拆成 `(loc, swa_loc, full_loc)`——各子池的写入路径按需取用对应的物理位置。
 
 - 4.1.2 CUDA kernel 直接写入 Block 显存，张量视图复用，无 `clone/copy`
 
@@ -2090,15 +2104,15 @@ def set_kv_buffer(self, layer, loc_info, cache_k, cache_v, k_scale=None, ...):
 
 要点：
 - **dtype 视图复用**：fp8 存储时 `store_dtype=uint8`，`cache_k = cache_k.view(self.store_dtype)` 后直接写，不重新分配（L1700-1702）。`_get_key_buffer` 读出时再 `view(self.dtype)` 还原。
-- **`alt_stream` 异步写**：`enable_alt_stream=True`（CUDA）时 KV 写入走独立 CUDA stream（L1151），与 attention 计算流重叠，避免写 KV 阻塞下一步计算。
+- **`alt_stream` 异步写**：`enable_alt_stream=True`（CUDA）时 KV 写入走独立 CUDA stream（L1379），与 attention 计算流重叠，避免写 KV 阻塞下一步计算。
 - **`same_kv_dim` 优化**：当 `head_dim == v_head_dim`，K/V 写入 kernel 可合并特化，省一次 kernel 调度。
 - **越界防护**：`maybe_detect_oob`（受 `SGLANG_ENABLE_ASYNC_ASSERT` 控制）在写前校验 `loc` 范围，把"stale slot id 导致的静默 KV 损坏/非法地址"变成可定位的断言。
 
-MLA 的写入（`MLATokenToKVPool.set_kv_buffer` L2243）更简单——单 `kv_buffer`，`self.kv_buffer[layer_id-start_layer][loc] = cache_k` 直接索引赋值；`set_mla_kv_buffer`（L2752）分 nope/rope 两段并可走 fp8 量化。DSA 的索引写入 `set_index_k_scale_buffer`（L2692）通过 `index_buf_accessor.SetKAndS.execute` 融合写 K+scale 到打包页。
+MLA 的写入（`MLATokenToKVPool.set_kv_buffer` L2723）更简单——单 `kv_buffer`，`self.kv_buffer[layer_id-start_layer][loc] = cache_k` 直接索引赋值；`set_mla_kv_buffer`（L2752）分 nope/rope 两段并可走 fp8 量化。DSA 的索引写入 `set_index_k_scale_buffer`（L3172）通过 `index_buf_accessor.SetKAndS.execute` 融合写 K+scale 到打包页。
 
 ### 4.2 跨设备写入链路：`get_cpu_copy()` / `load_cpu_copy()` 同步 offload
 
-这是"把 GPU 显存 KV 写到 CPU 内存"的反向链路，用于 CPU offload 式 disagg 与 HiCache 下沉。`MHATokenToKVPool.get_cpu_copy`（`memory_pool.py:1573`）：
+这是"把 GPU 显存 KV 写到 CPU 内存"的反向链路，用于 CPU offload 式 disagg 与 HiCache 下沉。`MHATokenToKVPool.get_cpu_copy`（`memory_pool.py:1602`）：
 
 ```python
 def get_cpu_copy(self, indices, mamba_indices=None):
@@ -2116,7 +2130,7 @@ def get_cpu_copy(self, indices, mamba_indices=None):
     return kv_cache_cpu
 ```
 
-按 `cpu_offloading_chunk_size=8192` 分块、`non_blocking=True` 异步 D2H、首尾 `synchronize`。分块是为控制单次 DMA 的 pinned memory 占用与峰值显存波动。`load_cpu_copy`（L1591）对称地 H2D 回写 `self.k_buffer[layer_id][chunk_indices] = k_chunk`。
+按 `cpu_offloading_chunk_size=8192` 分块、`non_blocking=True` 异步 D2H、首尾 `synchronize`。分块是为控制单次 DMA 的 pinned memory 占用与峰值显存波动。`load_cpu_copy`（L1624）对称地 H2D 回写 `self.k_buffer[layer_id][chunk_indices] = k_chunk`。
 
 DSA 重写了 `get_cpu_copy`（`memory_pool.py:3184`）返回 `{"kv":..., "index_k":...}` 字典——latent KV 走 `super().get_cpu_copy`，索引页按 `page_indices = indices[::page_size] // page_size` 转 page 索引后单独 offload。注释（L3184-3189）强调：retract 释放的页会被别的请求 `set_index_k_scale_buffer` 复用，若不同步 offload 索引缓存，resume 时会恢复 latent 却留下别家的 index/scale → DSA 注意力读到错位垃圾。这是 DSA 双缓冲一致性的写入侧保障。
 
@@ -2216,12 +2230,12 @@ SGLang scheduler 是单线程事件循环（`managers/scheduler.py` 的 `event_l
 
 `HiRadixCache` 引入后台 write-through 和 load-back 后，主线程的树操作会与后台 I/O 线程竞争同一节点的 `value`/`host_value`。HiRadixCache 用三样机制隔离：
 
-1. **`ongoing_write_through` dict**（`hiradix_cache.py:172`）：`{node_id: node}`，追踪正在执行 write-through 下沉的节点。新 write-through 操作在插入字典前先检查 `node_id` 不冲突。
-2. **`ongoing_load_back` dict**（`hiradix_cache.py:174`）：同对称追踪 load-back 操作。
+1. **`ongoing_write_through` dict**（`hiradix_cache.py:192`）：`{node_id: node}`，追踪正在执行 write-through 下沉的节点。新 write-through 操作在插入字典前先检查 `node_id` 不冲突。
+2. **`ongoing_load_back` dict**（`hiradix_cache.py:194`）：同对称追踪 load-back 操作。
 3. **`host_ref_counter`（`TreeNode` L259）**：后台线程在传输期间调 `node.protect_host()` 使 `host_ref_counter += 1`，`release_host()` 后 -1。淘汰逻辑检查 `host_ref_counter > 0` 时拒绝回收主机数据——后台传输不完成，`host_value` 不被动。
 
 ```python
-# hiradix_cache.py:1159 load_back 中的保护
+# hiradix_cache.py:1259 load_back 中的保护
 result = self.inc_lock_ref(ancester_node)           # 设备侧计数保护
 # ... load_back 传输 ...
 self.dec_lock_ref(ancester_node)                     # 传输完成解除保护
@@ -2681,7 +2695,7 @@ L1 全命中的读取延迟 = Triton indices kernel（~0.01ms for 10K tokens）+
 
 **L2 部分命中（`value` 为空但 `host_value` 非空）—— H2D DMA 回灌再读**：
 
-`HiRadixCache.load_back`（`hiradix_cache.py:1143`）完整回灌流程：
+`HiRadixCache.load_back`（`hiradix_cache.py:1237`）完整回灌流程：
 
 ```python
 def load_back(self, node, mem_quota=None):
@@ -2752,7 +2766,7 @@ L3（file/mooncake/hf3fs 等存储后端）→ L2（HostKVCache）→ L1（GPU�
 | L3 (Storage) | file/mooncake 等远端 | ~10-100ms+ (I/O) | `storage_hit_length > 0` |
 | 重算 | 无缓存 | ~prefill 延迟 | 缓存未命中且不等待 |
 
-`load_back_threshold = 10`（`hiradix_cache.py:186`）—— < 10 token 直接重算（DMA setup 开销 > 算 10 token 的成本）。
+`load_back_threshold = 10`（`hiradix_cache.py:206`）—— < 10 token 直接重算（DMA setup 开销 > 算 10 token 的成本）。
 
 ### 5.6 [GLM-5.2 适配] RoPE 位置偏移修正与稀疏 Token 精准读取
 
@@ -2899,7 +2913,7 @@ if new_swa_evicted_seqlen > req.swa_evicted_seqlen:
 
 关键设计点：`swa_evicted_seqlen` 是惰性推进——每步 decode/extend 时才检查是否需要滚窗，窗口超出量一次释放。默认保留一个 `page_size` margin（`drop_page_margin=False` 不丢弃 margin，L92-95），确保始终有一页 SWA KV 在滑动窗口外保留在树里作为非 tombstone 节点，防止多轮对话场景下的 SWA 内存泄漏（与 `swa_radix_cache.py` 的 `_insert_helper` case 3 联动，注释见 L88-91）。
 
-`maybe_evict_swa`（`schedule_batch.py:2864`）在 batch 级控制触发：decode 模式下记录 `swa_maintenance_step` 按 `SGLANG_SWA_EVICTION_INTERVAL`（默认 1）控制频率，避免每步都查；overlap 模式下 req 的 `decode_batch_idx>=1` 才触发（确保前一个 extend batch 已完成）。同时有一个优化路径 `SGLANG_OPT_SWA_RELEASE_LEAF_LOCK_AFTER_WINDOW`：decode 位置滑出窗口后把 SWA 部分的树锁降级（`dec_swa_lock_only` L2899），让 SWA evictable 叶子可在 LRU 压力下被回收。
+`maybe_evict_swa`（`schedule_batch.py:2864`）在 batch 级控制触发：decode 模式下记录 `swa_maintenance_step` 按 `SGLANG_SWA_EVICTION_INTERVAL`（默认 1）控制频率，避免每步都查；overlap 模式下 req 的 `decode_batch_idx>=1` 才触发（确保前一个 extend batch 已完成）。同时有一个优化路径 `SGLANG_OPT_SWA_RELEASE_LEAF_LOCK_AFTER_WINDOW`：decode 位置滑出窗口后把 SWA 部分的树锁降级（`dec_swa_lock_only` (`schedule_batch.py:2899`)），让 SWA evictable 叶子可在 LRU 压力下被回收。
 
 - **DSA 无效 Token KV 主动释放**
 
@@ -2967,7 +2981,7 @@ def release_kv_cache(req, tree_cache, is_insert=True):
 
 - 7.1.1 GPU↔CPU 请求级 Offload：`Req.offload_kv_cache()` / `load_kv_cache()`
 
-单个请求的 KV 从 GPU 搬移到 CPU 内存，对应 `KVCache.get_cpu_copy()` / `load_cpu_copy()`（`memory_pool.py:1573/1364`）。用于两个场景：（1）`TorchMemorySaverAdapter` 的显存压缩——请求排队期间暂时 offload 到 CPU 释放 GPU 压力；（2）PD 分离式 decode 端的 KV 暂存——prefill 生成后把 KV 卸载到 CPU，decode 端按需加载。
+单个请求的 KV 从 GPU 搬移到 CPU 内存，对应 `KVCache.get_cpu_copy()` / `load_cpu_copy()`（`memory_pool.py:1602/1364`）。用于两个场景：（1）`TorchMemorySaverAdapter` 的显存压缩——请求排队期间暂时 offload 到 CPU 释放 GPU 压力；（2）PD 分离式 decode 端的 KV 暂存——prefill 生成后把 KV 卸载到 CPU，decode 端按需加载。
 
 - 7.1.2 Prefill→Decode 分离式传输（Disaggregation PD）：NCCL / NIXL 跨节点
 
@@ -2992,7 +3006,7 @@ L2（HostKVCache）↔ L3（Storage Backend）的优先级升降级与后台上�
 
 - 7.2.3 `LayerDoneCounter`：layer-wise 传输控制（`register_layer_transfer_counter`）
 
-`KVCache.register_layer_transfer_counter(counter)`（L1061）注册一个逐层完成的计数器，`get_key_buffer` 和 `get_value_buffer` 在返回 buffer 前调用 `counter.wait_until(layer_id - start_layer)`（L1655）同步等待。这使 disagg 场景下的**逐层 KV 加载**成为可能——decode 端起 layer 0 的 KV 传输完成即可开始 attention，无需等全部 layer 传输完毕。`LayerDoneCounter` 本身定义在 `python/sglang/srt/managers/cache_controller.py:74`。
+`KVCache.register_layer_transfer_counter(counter)`（L1278）注册一个逐层完成的计数器，`get_key_buffer` 和 `get_value_buffer` 在返回 buffer 前调用 `counter.wait_until(layer_id - start_layer)`（L1655）同步等待。这使 disagg 场景下的**逐层 KV 加载**成为可能——decode 端起 layer 0 的 KV 传输完成即可开始 attention，无需等全部 layer 传输完毕。`LayerDoneCounter` 本身定义在 `python/sglang/srt/managers/cache_controller.py:74`。
 
 ### 7.3 Disaggregation PD 传输链路
 
@@ -3199,7 +3213,7 @@ SWATokenToKVPoolAllocator
 **写入：`KVWriteLoc` 双写**：
 
 ```python
-KVWriteLoc(loc=full_pool_slot, swa_loc=swa_pool_slot)
+KVWriteLoc(loc=virtual_slot, swa_loc=swa_pool_slot, full_loc=full_pool_slot)
 ```
 
 `set_kv_buffer` 一次调用，`unwrap_write_loc` 拆出两套 slot，分别写入 full pool 和 SWA pool——两套池、两套 slot、同一次操作。
@@ -3239,7 +3253,7 @@ if new_swa_evicted_seqlen > req.swa_evicted_seqlen:
 ```
 模型 32 层: Layer 0-7=Full Attn, Layer 8-31=SWA(window=4096)
 
-写入: set_kv_buffer(layer, KVWriteLoc(full=1024, swa=256), k, v)
+写入: set_kv_buffer(layer, KVWriteLoc(loc=1024, swa_loc=256, full_loc=None), k, v)
         → full_kv_pool.k_buffer[layer][1024]     = k  (Dense 层)
         → swa_kv_pool.k_buffer[layer-8][256]     = k  (SWA 层)
 
@@ -3621,7 +3635,7 @@ Round 2: "What is 2+2?" (same session A)
 
 **设计要点**：
 - **不跨 session 共享**：各 session 独立树路径——一个 session 的叶子不会污染其他 session 的前缀匹配
-- **TTL 自动清理**：`cache_ttl_seconds`（`CacheInitParams:49`）为 session 叶子设超时，超时未访问自动由 `_discard_session_leaf` 清理
+- **TTL 自动清理**：`cache_ttl_seconds`（`CacheInitParams:50`）为 session 叶子设超时，超时未访问自动由 `_discard_session_leaf` 清理
 - **session 叶子被淘汰时**：`_discard_session_leaf(node)` 从 session 索引中移除该节点，下一轮对话退化为普通 `match_prefix`（从根节点匹配）
 
 ### 9.6 会话超时/结束资源回收链路：`release_kv_cache()` 完整流程
@@ -3866,7 +3880,7 @@ PD 分离式传输与 HiCache 下沉共享 L2/L3 通道。`StorageMedium` 标记
 
 - **IO 限流**：`STORAGE_BATCH_SIZE` 分页批量传输 + 分块 8192 的 D2H/H2D，使 IO 步幅可控不会突发打满 PCIe。
 - **脏数据校验**：`hash_value`（第 2 章 2.3）提供节点级别 SHA256 链，L2/L3 读取前校验哈希一致性防止存储端位翻转。
-- **过期会话自动清理**：`cache_ttl_seconds`（`CacheInitParams:49`）为每个树节点设 TTL，超时未访问自动逐出——防止无会话命中的历史数据永久占 L2/L3。
+- **过期会话自动清理**：`cache_ttl_seconds`（`CacheInitParams:50`）为每个树节点设 TTL，超时未访问自动逐出——防止无会话命中的历史数据永久占 L2/L3。
 
 # 第六部分：源码导读
 ## 第11章 核心源码路径导读
@@ -3885,14 +3899,14 @@ PD 分离式传输与 HiCache 下沉共享 L2/L3 通道。`StorageMedium` 标记
 | 物理层（MHA） | `memory_pool.py` | `MHATokenToKVPool` | 1291-1942 |
 | 物理层（MLA） | `memory_pool.py` | `MLATokenToKVPool` | 2610-2868 |
 | 物理层（DSA） | `memory_pool.py` | `DSATokenToKVPool` | 3009- |
-| 公共入口 | `common.py` | `alloc_for_extend / alloc_for_decode / release_kv_cache / write_cache_indices` | 456-701 |
+| 公共入口 | `common.py` | `alloc_for_extend / alloc_for_decode / release_kv_cache / write_cache_indices` | 452-690 |
 
 ### 11.2 RadixCache 前缀匹配与淘汰
 
 | 模块 | 文件 | 关键类/函数 | 行号 |
 |---|---|---|---|
-| 基数树 | `radix_cache.py` | `RadixCache/TreeNode/RadixKey` | 60-825 |
-| 多级缓存 | `hiradix_cache.py` | `HiRadixCache` | 75- |
+| 基数树 | `radix_cache.py` | `RadixCache/TreeNode/RadixKey` | 60-830 |
+| 多级缓存 | `hiradix_cache.py` | `HiRadixCache` | 76- |
 | 混合模型 | `unified_radix_cache.py` | `UnifiedRadixCache` | 305- |
 | 淘汰策略 | `evict_policy.py` | LRU/LFU/SLRU/FIFO/MRU/FILO/Priority | 1-65 |
 | 策略工厂 | `utils.py` | `get_eviction_strategy` | 66-74 |
@@ -3914,15 +3928,15 @@ PD 分离式传输与 HiCache 下沉共享 L2/L3 通道。`StorageMedium` 标记
 | 模块 | 文件 | 关键类/函数 | 行号 |
 |---|---|---|---|
 | Triton 转换 | `layers/attention/triton_ops/kv_indices.py` | `create_flashinfer_kv_indices_triton / create_flashmla_kv_indices_triton` | 9-152 |
-| FlashInfer 后端 | `layers/attention/flashinfer_backend.py` | `FlashInferAttnBackend / FlashInferIndicesUpdaterDecode` | 291-1320+ |
+| FlashInfer 后端 | `layers/attention/flashinfer_backend.py` | `FlashInferAttnBackend / FlashInferIndicesUpdaterDecode` | 297-2193 |
 | MLA 后端 | `layers/attention/flashinfer_mla_backend.py` | MLA attention kernel 入口 | — |
 
 ### 11.5 调度入口与工具函数
 
 | 模块 | 文件 | 关键函数 | 行号 |
 |---|---|---|---|
-| 通用 alloc/release | `common.py` | `alloc_for_extend`<br>`alloc_for_decode`<br>`release_kv_cache`<br>`write_cache_indices`<br>`alloc_token_slots`<br>`evict_from_tree_cache`<br>`get_last_loc`<br>`get_alloc_len_per_decode` | 68-701 |
-| 调度入口 | `managers/schedule_batch.py` | `ScheduleBatch.maybe_evict_swa` | 2864- |
+| 通用 alloc/release | `mem_cache/common.py` | `alloc_for_extend`<br>`alloc_for_decode`<br>`release_kv_cache`<br>`write_cache_indices`<br>`alloc_token_slots`<br>`evict_from_tree_cache`<br>`get_last_loc`<br>`get_alloc_len_per_decode` | 69-690 |
+| 调度入口 | `managers/schedule_batch.py` | `ScheduleBatch.maybe_evict_swa` | 2870- |
 | 初始化路由 | `model_executor/model_runner_kv_cache_mixin.py` | `_init_pools` 按模型类型选 pool 类 | — |
 | Pool 组装 | `model_executor/pool_configurator.py` | 按 config 将各层分配到正确的 KVCache 子类 | — |
 
