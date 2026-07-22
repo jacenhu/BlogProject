@@ -1925,6 +1925,18 @@ def get_key_buffer(self, layer_id: int):
 
 PP 的关键性质：**请求跨 PP stage 时 KV 不迁移**——layer 0~9 的 KV 在 rank 0，layer 10~19 的 KV 在 rank 1。激活值经 P2P send/recv 在 rank 间流水传递，每个 stage 的 KV 静默留在本地。这种"KV 切片固定、激活流动"的设计避免了跨 stage 的 KV 迁移开销——PP 只传激活（embedding 维度的向量），不传 KV（每个 token 的 K/V 多维度矩阵）。
 
+**`layer_id - start_layer` 的本质**：全局层号到本地 buffer 下标的映射。例如 40 层模型 PP=4：
+
+```
+全局层:  0..9     │ 10..19    │ 20..29    │ 30..39
+Rank 0:  buf[0..9] start=0                           ← layer_id=5  → buf[5]
+Rank 1:             buf[0..9]  start=10              ← layer_id=15 → buf[15-10]=buf[5]
+Rank 2:                        buf[0..9]  start=20   ← layer_id=25 → buf[25-20]=buf[5]
+Rank 3:                                   start=30   ← layer_id=35 → buf[35-30]=buf[5]
+```
+
+每个 rank 的 `k_buffer` 只有 `end_layer - start_layer + 1` 个元素，但 attention 代码里传的是全局层号。`layer_id - start_layer` 将全局号映射到本地下标。不在 `[start_layer, end_layer)` 范围内的层不会调用本 rank 的 `get_key_buffer`——该 rank 压根没有这些层的 attention 计算。
+
 **PP micro-batch 间的 KV 保持策略**：
 
 PP 将 batch 切为多个 micro-batch 以填满流水线 bubble。每个 micro-batch 的前向传播经过各 stage 时，该 stage 的 attention 层会产生该 micro-batch 中 token 的 KV，写入本地物理池。关键设计：**同一 batch 的不同 micro-batch 共享同一个 KV 物理池**——第一个 micro-batch 完成 layer 0 attention 时 KV 写入 `k_buffer[0]`，第二个 micro-batch 调度到 layer 0 时同样写入 `k_buffer[0]`（不同 token 位置），互不覆盖。这是因为不同 micro-batch 的 token 在物理池中分配到不同的 slot 位置（`alloc_for_extend` 已为整个 batch 的所有 token 预先分配连续 slot 段）。
@@ -3551,6 +3563,34 @@ def glm52_sparse_layer_forward(hidden_states, positions, layer_id):
 | **Pool 组装复杂度** | 四类层（Dense/Sparse/SWA/MoE）需要 `GLM52KVDispatcher` 根据 `layer_id` 路由到正确的 pool 和 allocator。现有 `model_executor/pool_configurator.py` 最多支持三类（full/swa/mamba） | 中。需扩展 dispatcher |
 | **RadixTree 兼容性** | Dense 层和 Sparse 层在同一棵树中共享前缀——树节点 value 存的是 Dense 层 slot，Sparse 层需要额外的 index slot 映射 | 高。`DSATokenToKVPool` 已实现 `move_kv_cache` 锁步搬迁 |
 | **HiCache offload** | DSA 的 `index_k_with_scale_buffer` 必须在 offload 时和 latent KV 一起搬运（`get_cpu_copy` 返回 dict），否则 resume 时 index 和 latent 不匹配 | 高。`DSATokenToKVPool.get_cpu_copy` 已实现 |
+
+**实际对接方式（基于 `release/v0.5.15` 已验证机制）**：
+
+GLM-5.2 不需要独立的模型文件或专用 Pool 类。对接通过 **config 字段驱动自动路由**，与 DeepSeek-V3.2 共享 `DSATokenToKVPool`：
+
+```
+HuggingFace GLM-5.2 config
+  │  kv_lora_rank=512              → 触发 use_mla_backend
+  │  qk_rope_head_dim=64           → MLA 参数
+  │  DSA 标记字段                   → is_deepseek_dsa() 返回 True
+  │  index_head_dim=128            → DSA 索引头维度
+  ▼
+model_runner_kv_cache_mixin.py:626-869  (_init_pools)
+  │
+  ├─ is_dsa_model = is_deepseek_dsa(config)               # L626
+  ├─ self.use_mla_backend and is_dsa_model                # L844
+  └─ DSATokenToKVPool(                                     # L855-869
+        max_total_num_tokens, page_size=64,
+        kv_lora_rank=512, qk_rope_head_dim=64,
+        index_head_dim=128, kv_cache_dim=calc(),
+        start_layer, end_layer, ...)
+```
+
+**已合入 `release/v0.5.15` 的 GLM-5.2 支持**：
+- MTP index sharing with prefill CP（#30992）
+- MTP IndexShare across PD and CUDA graph replay（#30839）
+- NVFP4 + flashinfer_trtllm long-context fix（#31001）
+- DSA fused top-k v2 for GLM-5.x（#30506）
 
 **一句话**：GLM-5.2 的 KV 适配**不是纯配置工作**——物理池（`DSATokenToKVPool`/`SWAKVPool`/`MLATokenToKVPool`）可直接复用，但 attention backend（DSA 两阶段 kernel）和 pool dispatcher（四类层路由）需要新写。估算工作量：backend ~1000-2000 行 CUDA/Triton，dispatcher ~200-500 行 Python，测试 ~500-1000 行。
 
