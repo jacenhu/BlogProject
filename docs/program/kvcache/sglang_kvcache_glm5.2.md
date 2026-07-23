@@ -650,7 +650,7 @@ class KVCache(abc.ABC):
         self.page_size = page_size            # 分页大小
         self.dtype = dtype                    # 计算 dtype
         if dtype in (torch.float8_e5m2, torch.float8_e4m3fn, ...):
-            # fp8 存为 uint8：Tensor.index_put 不支持 fp8（L1208-1212）
+            # fp8 存为 uint8：Tensor.index_put 不支持 fp8（L1210-1214）
             self.store_dtype = torch.uint8
         else:
             self.store_dtype = dtype
@@ -705,7 +705,7 @@ V: (num_blocks, H, page // X, D_v, X)     # X = 16 / dtype_itemsize，fp8=16，b
 
 为 aiter `mha_batch_prefill_func` / `pa_decode_gluon` 原生消费的 SHUFFLE 物理布局。
 
-元数据加速（创建时预计算 GPU 端指针表，供 JIT kernel 直接取址，L1515-1532）：
+元数据加速（创建时预计算 GPU 端指针表，供 JIT kernel 直接取址，L1537-1554）：
 
 ```python
 self.data_ptrs    = torch.cat([k_data_ptrs, v_data_ptrs])     # 各层 K/V 的 data_ptr (uint64)
@@ -2368,7 +2368,7 @@ def set_kv_buffer_prefix_valid(self, layer, loc_2d, commit_lens, cache_k, cache_
 
 **DSA 稀疏写入——GLM-5.2 实际场景**：
 
-GLM-5.2 不使用 SWA。KV 写入的控制由 DSA 的 `indexer_types` 决定：只有 `"full"` 的 20 层需要生成并写入 `index_k_with_scale_buffer`，`"shared"` 的 58 层在 attention 时直接复用同组 full 层的索引。索引写入走标准 DSA 路径：
+GLM-5.2 不使用 SWA。KV 写入的控制由 DSA 的 `indexer_types` 决定：只有 `"full"` 的 21 层需要生成并写入 `index_k_with_scale_buffer`，`"shared"` 的 57 层在 attention 时直接复用同组 full 层的索引。索引写入走标准 DSA 路径：
 
 ```python
 class HybridLinearKVPool(KVCache):
@@ -2495,7 +2495,7 @@ Layer 3: flashinfer decode kernel
   |  K/V 数据在 kernel 内部按需从显存直接 load，不走中间 buffer
 ```
 
-**`data_ptrs` 的指针预注册**（`memory_pool.py:1515`）：
+**`data_ptrs` 的指针预注册**（`memory_pool.py:1537`）：
 
 ```python
 self.k_data_ptrs = torch.tensor(
@@ -2519,7 +2519,7 @@ def _get_key_buffer(self, layer_id: int):
     return self.k_buffer[layer_id - self.start_layer]
 ```
 
-`k_buffer[layer_id]` 物理上以 `uint8` 存储（因为 `torch.Tensor.index_put` 不支持 fp8 类型，`memory_pool.py:1208-999`）。`.view(self.dtype)` 是一次**纯元数据操作**（修改 tensor 的 dtype 和 reinterpret shape，不碰显存）。flashinfer kernel 看到的就是 fp8/bf16 的计算格式，硬件 load 时自动做 fp8→fp16 的数值转换。
+`k_buffer[layer_id]` 物理上以 `uint8` 存储（因为 `torch.Tensor.index_put` 不支持 fp8 类型，`memory_pool.py:1210-1214`）。`.view(self.dtype)` 是一次**纯元数据操作**（修改 tensor 的 dtype 和 reinterpret shape，不碰显存）。flashinfer kernel 看到的就是 fp8/bf16 的计算格式，硬件 load 时自动做 fp8→fp16 的数值转换。
 
 **CUDA Graph 路径的固定 buffer 优化**：
 
@@ -3411,7 +3411,7 @@ def mix_with_running(self, running_batch):
 
 ### 8.6 FP8 量化 KV Cache：`store_dtype=torch.uint8` 的数值对齐与精度兼容
 
-`KVCache.__init__`（`memory_pool.py:1208-999`）的核心处理：
+`KVCache.__init__`（`memory_pool.py:1210-1214`）的核心处理：
 
 ```python
 if dtype in (torch.float8_e5m2, torch.float8_e4m3fn, torch.float8_e4m3fnuz):
@@ -3442,9 +3442,9 @@ GLM-5.2 共 **78 层** attention，**全部使用 DSA**（不是 dense/sparse �
   │
   ├─ DSA indexer (index_k_with_scale_buffer):
   │     indexer_types 决定哪些层独立维护索引 K:
-  │       "full"   : 20 层 (每 4 层一组的第 1 层) — 独立索引
-  │       "shared" : 58 层 — 复用同组 full 层的索引
-  │     只有 "full" 的 20 层分配 index buffer
+  │       "full"   : 21 层 (每 4 层一组的第 1 层) — 独立索引
+  │       "shared" : 57 层 — 复用同组 full 层的索引
+  │     只有 "full" 的 21 层分配 index buffer
   │
   └─ FFN 层 (不产生 KV):
         mlp_layer_types 决定 FFN 类型:
@@ -3473,7 +3473,7 @@ self.token_to_kv_pool = DSATokenToKVPool(
     index_head_dim=128,                              # config.index_head_dim
 )
 
-# 注意: 由于 indexer_types 中存在 "shared" 层（58 层复用索引），
+# 注意: 由于 indexer_types 中存在 "shared" 层（57 层复用索引），
 # 实际分配 index_k_with_scale_buffer 的层数可能 < 78。
 # 这需要在 DSATokenToKVPool 的 layer_num 参数中体现。
 ```
@@ -3579,7 +3579,7 @@ config.kv_lora_rank=512 (非空)
 
 **GLM-5.2 与 DeepSeek-V3.2 共享同一套 KV 物理池**——两者都在 `is_deepseek_dsa` 的白名单中（分别是 `GlmMoeDsaForCausalLM` 和 `DeepseekV32ForCausalLM`），都走 `DSATokenToKVPool`。GLM-5.2 不需要 SWA 池（config.json 中无 sliding window）、不需要 `MLATokenToKVPool`（所有层都是 DSA 而非纯 MLA）、不需要自定义 dispatcher——`_init_pools` 的标准 DSA 路径（L844-869）直接覆盖。
 
-**`indexer_types` 的 "shared" 层含义**：58 层共享索引不意味着 KV 物理池要特殊处理——`DSATokenToKVPool` 只需为 "full" 的 20 层创建 `index_k_with_scale_buffer`，共享层在 attention kernel 中直接读取同组 full 层的 index buffer。这由 attention backend 的 index lookup 逻辑处理，不改变物理池的 `layer_num` 参数。
+**`indexer_types` 的 "shared" 层含义**：57 层共享索引不意味着 KV 物理池要特殊处理——`DSATokenToKVPool` 只需为 "full" 的 21 层创建 `index_k_with_scale_buffer`，共享层在 attention kernel 中直接读取同组 full 层的 index buffer。这由 attention backend 的 index lookup 逻辑处理，不改变物理池的 `layer_num` 参数。
 
 **已合入 `release/v0.5.15` 的 GLM-5.2 支持**：
 - `GlmMoeDsaForCausalLM` 架构注册（`model_config.py:112`）
@@ -4115,14 +4115,14 @@ is_deepseek_dsa()=True && use_mla_backend=True
 **`indexer_types` 的 KV 含义**：
 
 78 层 attention 的索引器分为两种类型：
-- `"full"`：每层独立索引 K（20 层，每 4 层一组的第 1 层）
-- `"shared"`：同组共享上一层的 full 索引 K（58 层，每 4 层一组的第 2-4 层）
+- `"full"`：每层独立索引 K（21 层，前3层全full + 每4层一组的第1层）
+- `"shared"`：同组共享上一层的 full 索引 K（57 层，前3层全shared + 每4层一组的第2-4层）
 
-这意味着 `index_k_with_scale_buffer` 只需为 `"full"` 的 20 层创建 index buffer——`"shared"` 层复用同组 full 层的索引。这会反映在 `DSATokenToKVPool` 的 `layer_num` 参数中（仅 full 层分配 index buffer）。
+这意味着 `index_k_with_scale_buffer` 只需为 `"full"` 的 21 层创建 index buffer——`"shared"` 层复用同组 full 层的索引。这会反映在 `DSATokenToKVPool` 的 `layer_num` 参数中（仅 full 层分配 index buffer）。
 
 **KV 显存估算**（fp8，max_num_tokens=128K，仅 full index 层）：
 
 - latent KV：`128K × 576 × 78` ≈ **5.4 GB**（所有 78 层）
-- 索引 KV：`128K × (128+4) × 20` ≈ **0.33 GB**（仅 20 个 full 索引层）
-- 总计 ≈ **5.7 GB**
+- 索引 KV：`128K × (128+4) × 21` ≈ **0.35 GB**（仅 21 个 full 索引层）
+- 总计 ≈ **5.75 GB**
 
