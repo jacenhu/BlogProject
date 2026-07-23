@@ -42,7 +42,7 @@ SGLang 相较于 vLLM 最大架构革新是 **RadixTree（基数树）全局前�
     - [4.2 跨设备写入链路：`get_cpu_copy()` / `load_cpu_copy()` 同步 offload](#42-跨设备写入链路get_cpu_copy-load_cpu_copy-同步-offload)
     - [4.3 追加写入（Decode 增量）vs 覆盖写入（上下文重置/窗口刷新）](#43-追加写入decode-增量vs-覆盖写入上下文重置窗口刷新)
     - [4.4 Batch 并发写入锁竞争：RadixCache 全局读写锁与 Block 空闲池竞争规避](#44-batch-并发写入锁竞争radixcache-全局读写锁与-block-空闲池竞争规避)
-    - [4.5 [GLM-5.2 适配] 超长文本分段写入与 SWA 滑动窗口截断写入](#45-glm-52-适配-超长文本分段写入与-swa-滑动窗口截断写入)
+    - [4.5 [GLM-5.2 适配] 超长文本分段写入与 DSA 稀疏索引写入](#45-glm-52-适配-超长文本分段写入与-dsa-稀疏索引写入)
 - [第5章 KV Cache 读取机制：Attention 计算核心链路](#第5章-kv-cache-读取机制attention-计算核心链路)
     - [5.1 标准读取全流程：Query 计算 → `req_to_token` 查页表 → `create_flashinfer_kv_indices_triton` 转换为 paged KV → Attention kernel](#51-标准读取全流程query-计算-req_to_token-查页表-create_flashinfer_kv_indices_triton-转换为-paged-kv-attention-kernel)
     - [5.2 `IndicesUpdater`：`req_to_token` → flashinfer `paged_kv_indices` 的 Triton 转换 kernel](#52-indicesupdaterreq_to_token-flashinfer-paged_kv_indices-的-triton-转换-kernel)
@@ -53,7 +53,7 @@ SGLang 相较于 vLLM 最大架构革新是 **RadixTree（基数树）全局前�
 - [第6章 KV Cache 淘汰与内存回收机制](#第6章-kv-cache-淘汰与内存回收机制)
     - [6.1 显存水位线分级管控：软阈值降级 Swap / 硬阈值强制淘汰](#61-显存水位线分级管控软阈值降级-swap-硬阈值强制淘汰)
     - [6.2 `evict_policy.py`：可插拔淘汰策略（LRU / LFU / SLRU / FIFO）](#62-evict_policypy可插拔淘汰策略lru-lfu-slru-fifo)
-    - [6.3 [GLM-5.2 适配] SWA 窗口外 KV 强制过期 + DSA 无效 Token KV 主动释放](#63-glm-52-适配-swa-窗口外-kv-强制过期-dsa-无效-token-kv-主动释放)
+    - [6.3 [GLM-5.2 适配] DSA 稀疏 KV 管理：索引一致性与淘汰策略](#63-glm-52-适配-dsa-稀疏-kv-管理索引一致性与淘汰策略)
     - [6.4 细粒度 slot 回收 vs 粗粒度整会话回收](#64-细粒度-slot-回收-vs-粗粒度整会话回收)
     - [6.5 双层 RC 防误删：`TreeNode.lock_ref` + `host_ref_counter`](#65-双层-rc-防误删treenodelock_ref-host_ref_counter)
     - [6.6 淘汰后置：树分支修剪、`req_to_token` 索引刷新、slot 归还 `free_pages`、HiCache 下沉传输标记](#66-淘汰后置树分支修剪、req_to_token-索引刷新、slot-归还-free_pages、hicache-下沉传输标记)
@@ -2303,7 +2303,7 @@ self.alt_stream = (
 
 **一句话总结**：SGLang 用四层隔离替代全局锁——单线程串行化树操作（无锁）、`ongoing_*` 字典追踪异步传输（按节点追踪）、allocator 一次切整段 slot（无并发竞争）、CUDA alt_stream 分离写入流与计算流（GPU 级重叠）。没有一处需要显式 `threading.Lock`。
 
-### 4.5 [GLM-5.2 适配] 超长文本分段写入与 SWA 滑动窗口截断写入
+### 4.5 [GLM-5.2 适配] 超长文本分段写入与 DSA 稀疏索引写入
 
 **定位**：GLM-5.2 面向 1M+ 上下文（`max_position_embeddings=1048576`），写入侧的核心挑战是"长文本如何分段落盘"。GLM-5.2 不使用 SWA（config.json 中无 sliding window），KV 量的控制由 DSA 稀疏 attention（`index_topk=2048`，仅 2048 个 token 参与 attention）完成，而非窗口裁剪。SGLang 已有 chunked prefill + DSA 双轨覆盖。
 
@@ -2906,7 +2906,7 @@ VIP 请求（`priority=100`）的前缀路径上所有节点都被"拉高"到 10
 
 **可插拔性**：新增策略只需两步——①继承 `EvictionStrategy` 实现 `get_priority`，②在 `_EVICTION_POLICY_FACTORIES` 注册名字。`evict()` 方法通过 `self.eviction_strategy.get_priority(node)` 调用，不感知策略类型。`CacheInitParams.eviction_policy` 的字符串名在 `RadixCache.__init__` 中传到 `get_eviction_strategy` 实例化。
 
-### 6.3 [GLM-5.2 适配] SWA 窗口外 KV 强制过期 + DSA 无效 Token KV 主动释放
+### 6.3 [GLM-5.2 适配] DSA 稀疏 KV 管理：索引一致性与淘汰策略
 
 - **SWA 窗口外 KV 强制过期**
 
@@ -3428,7 +3428,7 @@ MoE 的专家层是 FFN，不产生 KV——KV 的分布与 MoE EP 路由解耦�
 
 ### 8.8 [GLM-5.2 推演] 结合 MLA + DSA + MoE 的综合 KV Cache 架构设计方向
 
-**前置声明**：GLM-5.2 尚未合入 SGLang 主线。本节基于 SGLang 已有的 MLA/DSA/SWA/MoE 基础设施进行**具体的适配方案推演**，而非理论设想。所有引用的类、API、配置点均已在 DeepSeek-V3.2 (DSA)、DeepSeek-V2/V3 (MLA)、Mistral (SWA) 等模型中验证。
+**前置声明**：GLM-5.2 的 `GlmMoeDsaForCausalLM` 架构已在 SGLang `release/v0.5.15` 中注册（`model_config.py:112`），MTP index sharing 等特性已合入。KV 物理池通过 `DSATokenToKVPool` 直接复用，与 DeepSeek-V3.2 共享同一套基础设施。本节基于真实 `config.json`（附录 A.4）进行具体的适配方案分析。
 
 **GLM-5.2 实际架构（基于真实 `config.json`）**：
 
@@ -3535,7 +3535,7 @@ def glm52_sparse_layer_forward(hidden_states, positions, layer_id):
 |---|---|---|
 | **Attention Backend 实现** | GLM-5.2 需要一个新的 triton/CUDA backend，实现 DSA 的两阶段 attention（索引扫描 + 稀疏计算）。SGLang 目前没有开源的 DSA backend——DeepSeek-V3.2 的 DSA backend 未公开 | 低。需从零实现或适配闭源 kernel |
 | **FP8 量化兼容** | DSA 索引 K 必须用 fp8 存储（`index_k_with_scale_buffer` 的 dtype=uint8），MLA latent 可选用 fp8/bf16。两套精度体系需在同一个 pool 中协调 | 中。DSATokenToKVPool 已支持，但需验证精度 |
-| **Pool 组装复杂度** | 四类层（Dense/Sparse/SWA/MoE）需要 `GLM52KVDispatcher` 根据 `layer_id` 路由到正确的 pool 和 allocator。现有 `model_executor/pool_configurator.py` 最多支持三类（full/swa/mamba） | 中。需扩展 dispatcher |
+| **Pool 组装复杂度** | 78 层全部使用 DSA attention，仅需一个 `DSATokenToKVPool`，无需 dispatcher。`_init_pools` 标准 DSA 路径直接覆盖 | 低。零新代码 |
 | **RadixTree 兼容性** | Dense 层和 Sparse 层在同一棵树中共享前缀——树节点 value 存的是 Dense 层 slot，Sparse 层需要额外的 index slot 映射 | 高。`DSATokenToKVPool` 已实现 `move_kv_cache` 锁步搬迁 |
 | **HiCache offload** | DSA 的 `index_k_with_scale_buffer` 必须在 offload 时和 latent KV 一起搬运（`get_cpu_copy` 返回 dict），否则 resume 时 index 和 latent 不匹配 | 高。`DSATokenToKVPool.get_cpu_copy` 已实现 |
 
@@ -3836,24 +3836,25 @@ for chunk_i in range(num_chunks):
 
 **记忆裁剪（Memory Pruning）场景**：
 
-GLM-5.2 如采用 SWA + DSA 双重裁剪：
+GLM-5.2 的 KV 裁剪由 DSA 稀疏注意力实现（不使用 SWA）：
 
 ```
-SWA（滑动窗口裁剪）:
-  free_swa_out_of_window_slots(req, sliding_window=4096)
-    → 释放 seq_len-4096-page_size 之前的 SWA slot
-    → 效果: SWA 层的 KV 总量恒定为 4096 token，与上下文长度无关
+DSA 稀疏 Top-K 裁剪:
+  所有 78 层: get_index_k_scale_buffer → DSA kernel Top-K(2048)
+    → 只有 K=2048 个 token 的 latent KV 参与 attention
+    → 效果: Sparse attention 的有效 KV 量恒定为 2048 token
+    → indexer_types 优化: 仅 21 层独立维护索引 K，57 层复用同组索引
 
-DSA（稀疏 Top-K 裁剪）:
-  Sparse 层: get_index_k_scale_buffer → DSA kernel Top-K(512)
-    → 只有 K=512 个 token 的完整 KV 参与 attention
-    → 效果: Sparse 层的有效 KV 量恒定为 512 token，不受上下文膨胀影响
+MLA latent 压缩:
+  所有 78 层: kv_lora_rank=512 压缩 latent KV
+    → 每 token 576 元素 vs 全量 MHA 24576 元素 (~42.7× 压缩)
+    → 效果: 物理存储量大幅降低
 
-Full Attention 层:
-  full_kv_pool: 全量 token 保留（可 offload 到 L2/L3 via HiCache）
+HiCache 多级卸载（可选）:
+  冷数据 offload 到 L2/L3，热数据保留 GPU
 ```
 
-三种裁剪层级联：SWA 层（环形窗口）→ DSA 稀疏层（Top-K）→ Full 层（全量但可 offload 到 L2/L3）。GLM-5.2 适配只需组合 SGLang 已有的 `SWATokenToKVPoolAllocator` + `DSATokenToKVPool` + `HiRadixCache` 三层 infrastructure——各机制互相独立、可单独开关。
+GLM-5.2 的 KV 总量由两个维度联合控制：DSA 稀疏（attention 计算只涉及 2048 token）+ MLA 压缩（每 token 576 元素 vs 全量 24576）。两者叠加使 1M 上下文的 KV 总量可控。实际适配只需 `DSATokenToKVPool`（KV 物理池已在 `_init_pools` 中自动路由），无需 SWA 或自定义 dispatcher。
 
 # 第五部分：HiCache 多级缓存工程优化
 ## 第10章 SGLang HiCache 多级缓存架构原理
