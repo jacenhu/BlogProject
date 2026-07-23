@@ -2305,7 +2305,7 @@ self.alt_stream = (
 
 ### 4.5 [GLM-5.2 适配] 超长文本分段写入与 SWA 滑动窗口截断写入
 
-**定位**：GLM-5.2 面向 1M+ 上下文，写入侧的核心挑战是"长文本如何分段落盘"和"窗口外的 KV 如何截断"。SGLang 已有 chunked prefill + SWA 双池两条路径完美覆盖。
+**定位**：GLM-5.2 面向 1M+ 上下文（`max_position_embeddings=1048576`），写入侧的核心挑战是"长文本如何分段落盘"。GLM-5.2 不使用 SWA（config.json 中无 sliding window），KV 量的控制由 DSA 稀疏 attention（`index_topk=2048`，仅 2048 个 token 参与 attention）完成，而非窗口裁剪。SGLang 已有 chunked prefill + DSA 双轨覆盖。
 
 **超长文本分段写入（Chunked Prefill）**：
 
@@ -2366,9 +2366,9 @@ def set_kv_buffer_prefix_valid(self, layer, loc_2d, commit_lens, cache_k, cache_
 
 这种"每 chunk 结束→插树→下 chunk 匹配"的链式写入保证 chunk 间 KV 不丢失、不重复。
 
-**SWA 滑动窗口截断写入——GLM-5.2 Hybrid 场景**：
+**DSA 稀疏写入——GLM-5.2 实际场景**：
 
-若 GLM-5.2 部分层采用 SWA（仅窗口内 token 参与 attention），写入路径用 `HybridLinearKVPool`（`memory_pool.py:2361`）的双池架构：
+GLM-5.2 不使用 SWA。KV 写入的控制由 DSA 的 `indexer_types` 决定：只有 `"full"` 的 20 层需要生成并写入 `index_k_with_scale_buffer`，`"shared"` 的 58 层在 attention 时直接复用同组 full 层的索引。索引写入走标准 DSA 路径：
 
 ```python
 class HybridLinearKVPool(KVCache):
@@ -2388,14 +2388,14 @@ SWA 截断在写入前发生：`free_swa_out_of_window_slots`（`common.py:69`�
 
 **GLM-5.2 适配结论**：
 
-| 场景 | 写入路径 | 改动量 |
+| 场景 | 写入路径 | GLM-5.2 改动量 |
 |---|---|---|
 | 长上下文分段 | chunked prefill + `set_kv_buffer_prefix_valid` | 零改动（config 设 `chunked_prefill_size`） |
-| SWA 窗口截断 | `HybridLinearKVPool` + `KVWriteLoc.swa_loc` | 零改动（config 设 `sliding_window_size` + 标注 SWA 层） |
-| DSA 稀疏写入 | `DSATokenToKVPool.set_kv_buffer` + `set_index_k_scale_buffer` | attention backend 需新增 DSA 写入路径 |
-| MLA 压缩写入 | `MLATokenToKVPool.set_mla_kv_buffer` | 零改动（MLA backend 通用） |
+| DSA 索引写入（full 层） | `DSATokenToKVPool.set_index_k_scale_buffer` | 零改动（DSA backend 通用） |
+| DSA 索引复用（shared 层） | 复用同组 full 层 index buffer，不额外写入 | attention backend 需新增 shared index lookup |
+| MLA latent 写入 | `DSATokenToKVPool.set_mla_kv_buffer`（继承自 MLA） | 零改动（MLA backend 通用） |
 
-综合：GLM-5.2 的长上下文写入完全复用 SGLang 已有 chunked prefill + SWA/MLA 写入基础设施。若叠加 DSA 稀疏注意力，增量工作在 attention backend 层（详见 8.8 节的 DSA Sparse Layer forward 伪代码）——物理池侧的 `DSATokenToKVPool`、`index_buf_accessor` 无需改动。
+综合：GLM-5.2 的长上下文写入完全复用 SGLang 已有 chunked prefill + DSA/MLA 写入基础设施。物理池侧的 `DSATokenToKVPool`、`index_buf_accessor` 无需改动——GLM-5.2 和 DeepSeek-V3.2 共享同一套 DSA 写入路径。
 
 
 ## 第5章 KV Cache 读取机制：Attention 计算核心链路
@@ -2931,7 +2931,7 @@ if new_swa_evicted_seqlen > req.swa_evicted_seqlen:
 
 DSA 稀疏注意力会在 sparse 层只保留部分"有效 token"的 KV（由 Top-K 路由选择），其余 token 对该层无注意力贡献。这对淘汰的影响是：DSA 的 `index_k_with_scale_buffer` 按页存索引 K+scale，evict 时不仅要释放 latent `kv_buffer` 的页，还要释放对应索引页——`move_kv_cache`（`memory_pool.py:3098`）与 `get_cpu_copy`（L3184）的锁步搬迁/卸载已保障这一点。SGLang 目前的淘汰按 `TreeNode.value` 的 slot 段粒度进行（一段对应整页），DSA 下的正确性要求是：**被淘汰的页同时在 kv_buffer 和 index_k_with_scale_buffer 两层里被一致释放**——`DSATokenToKVPool` 继承 MLA 的 `kv_buffer`（第 1 章）并在 `_clear_buffers` 中同时删除两个 buffer（L3094-3096），但单 token 粒度的淘汰精准性有赖于调度层按 page 对齐处理。
 
-GLM-5.2 的适配方向：若采用 DSA，稀疏层按 token_mask 维护有效 token 集合，淘汰策略应优先逐出"不在此 mask 内且不在当前窗口内"的 token KV，最大化稀疏层利用率。现有基础设施已支撑——`free_swa_out_of_window_slots` 与 `evict` 的组合可满足窗口 + LRU 双重筛选。DSA 与 SWA 的正交关系及综合适配方案详见 8.2.5 节（SWA）和 8.8 节（GLM-5.2 综合推演）。
+GLM-5.2 的适配方向：DSA 稀疏层按 `index_topk=2048` 选择历史 token，只有 Top-K 选中的 token 参与 attention。淘汰策略应优先逐出"不在当前 Top-K 集内"的 token KV——但 SGLang 的 `evict` 按 `TreeNode.value` 的 slot 段为最小粒度（一段对应整页），单 token 精度的稀疏感知淘汰需要调度层配合。现有基础设施已支撑——`DSATokenToKVPool.move_kv_cache` 的锁步搬迁保证 latent + index 的一致性释放。
 
 ### 6.4 细粒度 slot 回收 vs 粗粒度整会话回收
 
@@ -3430,77 +3430,52 @@ MoE 的专家层是 FFN，不产生 KV——KV 的分布与 MoE EP 路由解耦�
 
 **前置声明**：GLM-5.2 尚未合入 SGLang 主线。本节基于 SGLang 已有的 MLA/DSA/SWA/MoE 基础设施进行**具体的适配方案推演**，而非理论设想。所有引用的类、API、配置点均已在 DeepSeek-V3.2 (DSA)、DeepSeek-V2/V3 (MLA)、Mistral (SWA) 等模型中验证。
 
-**GLM-5.2 的层分配方案**：
+**GLM-5.2 实际架构（基于真实 `config.json`）**：
 
-假设 GLM-5.2 有 40 层 attention，分为四类：
+GLM-5.2 共 **78 层** attention，**全部使用 DSA**（不是 dense/sparse 分层）。与文档此前推演的"四类层混合"不同，实际架构更简洁：
 
 ```
-Layer  0-3:   Dense Full-Attention (MLA latent)          → full_kv_pool
-Layer  4-7:   Dense Full-Attention (MLA latent) + MoE FFN
-Layer  8-31:  Sparse Attention (MLA latent + DSA index)   → dsa_kv_pool
-Layer 32-35:  Sparse Attention (MLA latent + DSA index) + MoE FFN
-Layer 36-39:  SWA (MLA latent, sliding_window=4096)       → swa_kv_pool
+78 层 attention（全部 DSA）:
+  │
+  ├─ 全部 78 层: MLA latent KV (kv_buffer)
+  │     kv_lora_rank=512, qk_rope_head_dim=64, kv_cache_dim=576
+  │
+  ├─ DSA indexer (index_k_with_scale_buffer):
+  │     indexer_types 决定哪些层独立维护索引 K:
+  │       "full"   : 20 层 (每 4 层一组的第 1 层) — 独立索引
+  │       "shared" : 58 层 — 复用同组 full 层的索引
+  │     只有 "full" 的 20 层分配 index buffer
+  │
+  └─ FFN 层 (不产生 KV):
+        mlp_layer_types 决定 FFN 类型:
+          "dense"  : 前 3 层 — dense FFN
+          "sparse" : 后 75 层 — MoE FFN (256 专家, top-8 路由)
 ```
 
-`model_executor/pool_configurator.py` 中的组装逻辑（基于 `model_runner_kv_cache_mixin.py:_init_pools` 模式推演）：
+**因为没有 SWA 层、没有纯 dense attention 层，KV 物理池只需一个 `DSATokenToKVPool`**——不需要 `MLATokenToKVPool`（纯 MLA）、`SWAKVPool`（SWA）或自定义 dispatcher。实际初始化路径即为 `model_runner_kv_cache_mixin.py:844-869` 的单一路径：
 
 ```python
-# 按 model_config 将各层分配到 KV pool 子类
-def configure_glm52_pools(model_config, server_args):
-    # ① Dense 层: 标准 MLA latent pool
-    dense_layer_ids = [0, 1, 2, 3, 4, 5, 6, 7]
-    dense_pool = MLATokenToKVPool(
-        size=server_args.max_total_num_tokens,
-        page_size=server_args.page_size,
-        dtype=kv_cache_dtype,
-        kv_lora_rank=model_config.kv_lora_rank,       # MLA: 512
-        qk_rope_head_dim=model_config.qk_rope_head_dim, # MLA: 64
-        layer_num=len(dense_layer_ids),
-        device=device,
-        enable_memory_saver=...,
-    )
+# SGLang 对 GLM-5.2 的实际初始化 (model_runner_kv_cache_mixin.py:844-869)
+# 条件: is_deepseek_dsa(config)=True (arch=="GlmMoeDsaForCausalLM") + use_mla_backend=True
 
-    # ② Sparse 层: DSA pool (latent + index)
-    sparse_layer_ids = list(range(8, 36))
-    sparse_pool = DSATokenToKVPool(
-        size=server_args.max_total_num_tokens,
-        page_size=64,                                  # DSA CUDA 约束
-        kv_lora_rank=model_config.kv_lora_rank,
-        dtype=torch.float8_e4m3fn,                    # DSA index 用 fp8
-        qk_rope_head_dim=model_config.qk_rope_head_dim,
-        layer_num=len(sparse_layer_ids),
-        device=device,
-        index_head_dim=128,                            # DSA 索引头维度
-        kv_cache_dim=...,
-        enable_memory_saver=...,
-        index_buf_size=...,                            # 索引 buffer 大小
-    )
+self.token_to_kv_pool = DSATokenToKVPool(
+    size=self.max_total_num_tokens,
+    page_size=64,                                    # DSA CUDA 约束
+    dtype=self.kv_cache_dtype,                       # bfloat16
+    kv_lora_rank=512,                                # config.kv_lora_rank
+    qk_rope_head_dim=64,                             # config.qk_rope_head_dim
+    layer_num=78,                                    # config.num_hidden_layers
+    device=self.device,
+    kv_cache_dim=576,                                # 512 + 64
+    enable_memory_saver=self.server_args.enable_memory_saver,
+    start_layer=self.start_layer,                    # PP 分片
+    end_layer=self.end_layer,
+    index_head_dim=128,                              # config.index_head_dim
+)
 
-    # ③ SWA 层: Hybrid SWA pool（可选叠加 DSA）
-    swa_layer_ids = [36, 37, 38, 39]
-    swa_pool = SWAKVPool(
-        size=server_args.max_total_num_tokens,
-        size_swa=server_args.max_total_num_tokens // 2, # SWA 池容量 = full 的一半
-        page_size=server_args.page_size,
-        dtype=kv_cache_dtype,
-        head_num=model_config.num_attention_heads // tp_size,
-        head_dim=model_config.head_dim,
-        swa_attention_layer_ids=swa_layer_ids,
-        full_attention_layer_ids=[],                   # SWA 池无 full 层
-        enable_kvcache_transpose=False,
-        device=device,
-    )
-
-    # ④ 组装: 所有 pool 注册到 dispatcher
-    return GLM52KVDispatcher(
-        layer_to_pool={
-            **{lid: ("dense", dense_pool) for lid in dense_layer_ids},
-            **{lid: ("sparse", sparse_pool) for lid in sparse_layer_ids},
-            **{lid: ("swa", swa_pool) for lid in swa_layer_ids},
-        },
-        # MoE FFN 层不产生 KV，不需要 pool
-        moe_ffn_layers=set(range(4, 36)),
-    )
+# 注意: 由于 indexer_types 中存在 "shared" 层（58 层复用索引），
+# 实际分配 index_k_with_scale_buffer 的层数可能 < 78。
+# 这需要在 DSATokenToKVPool 的 layer_num 参数中体现。
 ```
 
 **MLA 与 DSA 结合的具体机制**：
@@ -3564,35 +3539,56 @@ def glm52_sparse_layer_forward(hidden_states, positions, layer_id):
 | **RadixTree 兼容性** | Dense 层和 Sparse 层在同一棵树中共享前缀——树节点 value 存的是 Dense 层 slot，Sparse 层需要额外的 index slot 映射 | 高。`DSATokenToKVPool` 已实现 `move_kv_cache` 锁步搬迁 |
 | **HiCache offload** | DSA 的 `index_k_with_scale_buffer` 必须在 offload 时和 latent KV 一起搬运（`get_cpu_copy` 返回 dict），否则 resume 时 index 和 latent 不匹配 | 高。`DSATokenToKVPool.get_cpu_copy` 已实现 |
 
-**实际对接方式（基于 `release/v0.5.15` 已验证机制）**：
+**实际对接方式（基于 `release/v0.5.15` 源码验证）**：
 
-GLM-5.2 不需要独立的模型文件或专用 Pool 类。对接通过 **config 字段驱动自动路由**，与 DeepSeek-V3.2 共享 `DSATokenToKVPool`：
+GLM-5.2 的 HuggingFace `config.json` 中关键字段（[zai-org/GLM-5.2](https://huggingface.co/zai-org/GLM-5.2)）：
+
+```json
+{
+  "architectures": ["GlmMoeDsaForCausalLM"],
+  "kv_lora_rank": 512,
+  "qk_rope_head_dim": 64,
+  "index_head_dim": 128,
+  "index_topk": 2048,
+  ...
+}
+```
+
+SGLang 通过这些字段**自动路由**到 `DSATokenToKVPool`，无需任何模型专属代码：
 
 ```
-HuggingFace GLM-5.2 config
-  │  kv_lora_rank=512              → 触发 use_mla_backend
-  │  qk_rope_head_dim=64           → MLA 参数
-  │  DSA 标记字段                   → is_deepseek_dsa() 返回 True
-  │  index_head_dim=128            → DSA 索引头维度
-  ▼
-model_runner_kv_cache_mixin.py:626-869  (_init_pools)
+config.architectures=["GlmMoeDsaForCausalLM"]
   │
-  ├─ is_dsa_model = is_deepseek_dsa(config)               # L626
-  ├─ self.use_mla_backend and is_dsa_model                # L844
-  └─ DSATokenToKVPool(                                     # L855-869
+  └─→ is_deepseek_dsa(config)                          model_config.py:103-115
+        │  _hf_arch(config) == "GlmMoeDsaForCausalLM"   ← 第 112 行显式注册
+        │  and config.index_topk is not None             ← DSA 标记字段
+        └─→ True
+
+config.kv_lora_rank=512 (非空)
+  │
+  └─→ self.use_mla_backend = True                       model_config.py:748
+
+两者同时为 True → model_runner_kv_cache_mixin.py:844:
+  │
+  └─→ DSATokenToKVPool(
         max_total_num_tokens, page_size=64,
         kv_lora_rank=512, qk_rope_head_dim=64,
         index_head_dim=128, kv_cache_dim=calc(),
         start_layer, end_layer, ...)
 ```
 
+**GLM-5.2 与 DeepSeek-V3.2 共享同一套 KV 物理池**——两者都在 `is_deepseek_dsa` 的白名单中（分别是 `GlmMoeDsaForCausalLM` 和 `DeepseekV32ForCausalLM`），都走 `DSATokenToKVPool`。GLM-5.2 不需要 SWA 池（config.json 中无 sliding window）、不需要 `MLATokenToKVPool`（所有层都是 DSA 而非纯 MLA）、不需要自定义 dispatcher——`_init_pools` 的标准 DSA 路径（L844-869）直接覆盖。
+
+**`indexer_types` 的 "shared" 层含义**：58 层共享索引不意味着 KV 物理池要特殊处理——`DSATokenToKVPool` 只需为 "full" 的 20 层创建 `index_k_with_scale_buffer`，共享层在 attention kernel 中直接读取同组 full 层的 index buffer。这由 attention backend 的 index lookup 逻辑处理，不改变物理池的 `layer_num` 参数。
+
 **已合入 `release/v0.5.15` 的 GLM-5.2 支持**：
+- `GlmMoeDsaForCausalLM` 架构注册（`model_config.py:112`）
 - MTP index sharing with prefill CP（#30992）
 - MTP IndexShare across PD and CUDA graph replay（#30839）
 - NVFP4 + flashinfer_trtllm long-context fix（#31001）
 - DSA fused top-k v2 for GLM-5.x（#30506）
 
-**一句话**：GLM-5.2 的 KV 适配**不是纯配置工作**——物理池（`DSATokenToKVPool`/`SWAKVPool`/`MLATokenToKVPool`）可直接复用，但 attention backend（DSA 两阶段 kernel）和 pool dispatcher（四类层路由）需要新写。估算工作量：backend ~1000-2000 行 CUDA/Triton，dispatcher ~200-500 行 Python，测试 ~500-1000 行。
+**一句话**：GLM-5.2 的 KV 物理池**零新增代码**——`DSATokenToKVPool` 直接复用，无自定义 dispatcher、无 SWA 池、无 MLA 池。主要工作在 attention backend 层（DSA 两阶段 kernel，~1000-2000 行 CUDA/Triton）和 `indexer_types` 的 shared 索引复用逻辑。
 
 ## 第9章 SGLang 端到端全推理链路时序闭环
 
@@ -4013,5 +4009,120 @@ SGLang 在 PagedAttention 的物理分页之上构建了 RadixTree 前缀共享�
 | `SWATokenToKVPoolAllocator` | `allocator/swa.py:20` | per-token HW | 组合 full+swa 两套 allocator，full_to_swa_index_mapping |
 | `HiSparseTokenToKVPoolAllocator` | `allocator/hisparse.py:15` | 主/辅双池 | 主池全量+辅助池高贡献 KV，双 allocator 同步 |
 
+### A.4 GLM-5.2 模型 `config.json` 参考
 
+来源：[zai-org/GLM-5.2](https://huggingface.co/zai-org/GLM-5.2/blob/main/config.json)。以下为完整配置，KV Cache 相关字段加粗标注。
+
+```json
+{
+  "architectures": ["GlmMoeDsaForCausalLM"],
+  "model_type": "glm_moe_dsa",
+
+  // === KV Cache 核心字段 ===
+  "kv_lora_rank": 512,                    // MLA: latent KV 的压缩维度
+  "qk_rope_head_dim": 64,                 // MLA: RoPE 部分的 head dim
+  "index_head_dim": 128,                  // DSA: 索引 K 的 head dim
+  "index_topk": 2048,                     // DSA: 稀疏 Top-K 选择数
+  "index_topk_freq": 4,                   // DSA: 索引更新的频率（每 4 层）
+  "index_skip_topk_offset": 3,            // DSA: 前 3 个 token 跳过 Top-K
+  "index_share_for_mtp_iteration": true,  // MTP: draft 迭代间共享索引
+
+  // === 模型结构 ===
+  "num_hidden_layers": 78,
+  "hidden_size": 6144,
+  "intermediate_size": 12288,
+  "num_attention_heads": 64,
+  "num_key_value_heads": 64,
+  "head_dim": 192,
+  "qk_head_dim": 256,
+  "qk_nope_head_dim": 192,
+  "v_head_dim": 256,
+  "q_lora_rank": 2048,
+
+  // === MoE 配置 ===
+  "moe_intermediate_size": 2048,
+  "n_routed_experts": 256,
+  "n_shared_experts": 1,
+  "num_experts_per_tok": 8,
+  "first_k_dense_replace": 3,
+  "moe_layer_freq": 1,
+  "routed_scaling_factor": 2.5,
+  "scoring_func": "sigmoid",
+  "topk_method": "noaux_tc",
+  "norm_topk_prob": true,
+
+  // === 层类型模式 ===
+  "mlp_layer_types": [
+    "dense","dense","dense",
+    "sparse","sparse","sparse",...],       // 前 3 层 dense + 75 层 sparse (MoE)
+
+  "indexer_types": [
+    "full","full","full",
+    "shared","shared","shared",
+    "full","shared","shared","shared",...],// 每 4 层一组 [full, shared×3]
+
+  // === 位置编码 ===
+  "max_position_embeddings": 1048576,      // 1M 上下文窗口
+  "rope_parameters": {"rope_theta": 8000000, "rope_type": "default"},
+  "rope_interleave": true,
+  "indexer_rope_interleave": true,
+
+  // === MTP (Multi-Token Prediction) ===
+  "num_nextn_predict_layers": 1,           // 1 层 NextN 预测头
+
+  // === 精度 ===
+  "dtype": "bfloat16",
+  "attention_bias": false,
+
+  // === 其他 ===
+  "vocab_size": 154880,
+  "rms_norm_eps": 1e-05,
+  "tie_word_embeddings": false,
+  "pretraining_tp": 1,
+  "ep_size": 1
+}
+```
+
+**SGLang KV Cache 对接分析**：
+
+| config.json 字段 | 值 | SGLang 检测位置 | 触发结果 |
+|---|---|---|---|
+| `architectures` | `["GlmMoeDsaForCausalLM"]` | `model_config.py:112` | `is_deepseek_dsa()` → `True` |
+| `index_topk` | `2048` | `model_config.py:114` | DSA 稀疏 Top-K 参数 |
+| `kv_lora_rank` | `512` | `model_config.py:748` | `use_mla_backend` → `True` |
+| `qk_rope_head_dim` | `64` | `model_runner_kv_cache_mixin.py:860` | 传入 `DSATokenToKVPool` |
+| `index_head_dim` | `128` | `model_runner_kv_cache_mixin.py:867` | 传入 `DSATokenToKVPool` |
+| `num_hidden_layers` | `78` | `model_runner_kv_cache_mixin.py:861` | `layer_num=78`（无 PP 时） |
+| `max_position_embeddings` | `1048576` | `model_config.py` | 1M 上下文窗口 |
+| `n_routed_experts` | `256` | MoE FFN | EP 路由，**不产生 KV** |
+| `first_k_dense_replace` | `3` | 前 3 层为 dense FFN | 与 KV 无关（attention 层统一 DSA） |
+
+**KV Cache 物理池选择结果**：
+
+```
+is_deepseek_dsa()=True && use_mla_backend=True
+  → model_runner_kv_cache_mixin.py:844
+  → DSATokenToKVPool(
+      size=max_total_num_tokens,
+      page_size=64,              // CUDA DSA 强制
+      kv_lora_rank=512, qk_rope_head_dim=64,
+      kv_cache_dim=576,          // 512 + 64 (同 MLA)
+      index_head_dim=128,        // DSA 索引 K 维度
+      index_topk=2048,           // 每 token 选 2048 个历史 token 做稀疏 attention
+      layer_num=78)
+```
+
+**`indexer_types` 的 KV 含义**：
+
+78 层 attention 的索引器分为两种类型：
+- `"full"`：每层独立索引 K（20 层，每 4 层一组的第 1 层）
+- `"shared"`：同组共享上一层的 full 索引 K（58 层，每 4 层一组的第 2-4 层）
+
+这意味着 `index_k_with_scale_buffer` 只需为 `"full"` 的 20 层创建 index buffer——`"shared"` 层复用同组 full 层的索引。这会反映在 `DSATokenToKVPool` 的 `layer_num` 参数中（仅 full 层分配 index buffer）。
+
+**KV 显存估算**（fp8，max_num_tokens=128K，仅 full index 层）：
+
+- latent KV：`128K × 576 × 78` ≈ **5.4 GB**（所有 78 层）
+- 索引 KV：`128K × (128+4) × 20` ≈ **0.33 GB**（仅 20 个 full 索引层）
+- 总计 ≈ **5.7 GB**
 
