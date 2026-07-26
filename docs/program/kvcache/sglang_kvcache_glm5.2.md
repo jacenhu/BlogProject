@@ -68,7 +68,7 @@ SGLang 相较于 vLLM 最大架构革新是 **RadixTree（基数树）全局前�
     - [8.1 SGLang 中已有的非标准 KV Cache 实现全景](#81-sglang-中已有的非标准-kv-cache-实现全景)
     - [8.2 MLA（Multi-Head Latent Attention）KV Cache 存储对比分析](#82-mlamulti-head-latent-attentionkv-cache-存储对比分析)
     - [8.2.5 SWA（Sliding Window Attention）混合双池架构](#825-swasliding-window-attention混合双池架构)
-    - [8.3 DSA（Dense-Sparse Attention）稀疏窗口机制](#83-dsadense-sparse-attention稀疏窗口机制)
+    - [8.3 DSA（DeepSeek-Sparse-Attention）稀疏窗口机制](#83-dsadense-sparse-attention稀疏窗口机制)
     - [8.4 RoPE 位置编码偏移引发的索引修正原理](#84-rope-位置编码偏移引发的索引修正原理)
     - [8.5 Continuous Batch 动态批处理资源调度](#85-continuous-batch-动态批处理资源调度)
     - [8.6 FP8 量化 KV Cache：`store_dtype=torch.uint8` 的数值对齐与精度兼容](#86-fp8-量化-kv-cachestore_dtypetorchuint8-的数值对齐与精度兼容)
@@ -728,26 +728,74 @@ self.data_strides = [np.prod(x.shape[1:]) * x.dtype.itemsize] # 每层单 token 
 
 适用 DeepSeek-V2/V3 的 Multi-head Latent Attention。核心省显存思想：**每 token 只存一个低秩潜在向量**，而非完整多头 K/V。
 
-张量布局（每层只有一个 `kv_buffer`，K/V 合一，L2672）：
+**张量形状**（`_create_buffers` L2672）：
 
 ```python
-self.kv_buffer[i] = torch.zeros(size + page_size, 1, kv_cache_dim)
-# kv_cache_dim = kv_lora_rank + qk_rope_head_dim   (默认 512 + 64 = 576)
+# 每层一个 tensor，共 layer_num 个
+self.kv_buffer[i] = torch.zeros(
+    (size + page_size, 1, kv_cache_dim),  # [token数, head=1, 每token字节]
+    dtype=self.store_dtype,               # uint8 (fp8) 或 bfloat16
+    device=self.device,
+)
 ```
 
-- `head_num=1`：所有查询头共享同一份 latent，头维坍缩为 1
-- latent 分两段：前 `kv_lora_rank` 是压缩的 V（nope 部分），后 `qk_rope_head_dim` 是带 RoPE 的 K
-- 对 128 头 × 128 维的模型，MHA 每 token 存 `128×128×2(K+V)`；MLA 只存 `576`，约 **57× 压缩**
+`head_num=1`：所有查询头共享同一份 latent，头维坍缩为 1。
 
-逻辑 K/V 拆分（物理一块连续，对外仍暴露 key/value，L2701-2718）：
+**每 token 的最后一维布局**——物理上一个连续向量，逻辑上分为两段：
+
+```
+无量化 (kv_cache_dim = 576, dtype = bf16):
+┌──────────────────────────────────┐
+│  V_nope(512 维)  │ K_rope(64 维) │
+│  bf16 × 512      │ bf16 × 64    │
+│  = 1024 bytes    │ = 128 bytes  │
+└──────────────────────────────────┘
+ ←─ kv_lora_rank ─→ ←─ qk_rope ──→
+
+FP8 DSA 量化 (kv_cache_dim = 656, dtype = uint8):
+┌──────────────────────────────────────────────────────────┐
+│  V_nope fp8(512B) │ nope scales(16B) │ K_rope bf16(128B) │
+└──────────────────────────────────────────────────────────┘
+```
+
+对 128 头 × 128 维的模型，MHA 每 token 存 `128×128×2(K+V)`；MLA 只存 `576`，约 **57× 压缩**。
+
+**物理 vs 逻辑**——只有一个 tensor，通过切片对外暴露 key/value（L2701-2718）：
 
 ```python
-def get_value_buffer(self, layer_id):
-    return self.kv_buffer[...][:, :, :self.kv_lora_rank]   # V = 前半
-# key 取整块（含 rope 段）
+# L2701 memory_pool.py
+def get_key_buffer(self, layer_id: int):
+    if self.store_dtype != self.dtype:
+        return self.kv_buffer[layer_id - self.start_layer].view(self.dtype)
+    return self.kv_buffer[layer_id - self.start_layer]       # 返回完整 [nope | rope]
+
+# L2710 memory_pool.py
+def get_value_buffer(self, layer_id: int):
+    if self.store_dtype != self.dtype:
+        return self.kv_buffer[layer_id - self.start_layer][
+            ..., : self.kv_lora_rank                          # 只返回前 512 维 (nope)
+        ].view(self.dtype)
+    return self.kv_buffer[layer_id - self.start_layer][
+        ..., : self.kv_lora_rank
+    ]
 ```
 
-写入：`set_kv_buffer(loc, cache_k, cache_v)` 把整块 latent 写入（支持 context parallel 的 `dcp` mask，L2734）；MLA 专用 `set_mla_kv_buffer(layer, loc, cache_k_nope, cache_k_rope)`（L2752）分别接收 nope/rope 两段，可走 FP8 量化路径（`dsa_kv_cache_store_fp8`、HIP triton 量化 `set_mla_kv_buffer_triton_fp8_quant`）。
+key 取完整的 `[nope | rope]`，value 只取前 `kv_lora_rank` 维的 nope 部分。
+
+**写入**（`set_mla_kv_buffer` L2752）：
+
+```python
+def set_mla_kv_buffer(self, layer, loc, cache_k_nope, cache_k_rope):
+    # cache_k_nope: (N, 1, kv_lora_rank)     # V_nope latent
+    # cache_k_rope: (N, 1, qk_rope_head_dim) # K_rope (已施加 RoPE)
+    # FP8 DSA 路径 (dsa_kv_cache_store_fp8=True):
+    #   cache_k_nope_fp8: (N, 1, 528) [nope_fp8(512) | scales(16)]
+    #   cache_k_rope_fp8: (N, 1, 128) [rope_bf16_bytes(128)]
+    #   分别量化后拼接写入 kv_buffer
+    set_mla_kv_buffer_triton(kv_buffer[layer], loc, nope_fp8, rope_fp8)
+```
+
+`set_kv_buffer`（L2723）用于非 MLA 路径（整块 latent 写入），`set_mla_kv_buffer` 是 MLA 专用（nope/rope 分开接收，支持 FP8 分量化路径）。
 
 DSA 钩子：`use_dsa=True` 时不立即打印分配日志（`_finalize_allocation_log` 推迟到 DSA 子类，因为 DSA 还要再分配 indexer 缓冲，L2660）。
 
@@ -795,6 +843,142 @@ else:
 
 - `move_kv_cache(tgt, src)`（L3098）：先 `super().move_kv_cache` 搬 latent，再逐层搬 `index_k_with_scale_buffer`
 - `get_cpu_copy` 返回 `{"kv":..., "index_k":...}` 字典。注释明确指出（L3184-3189）：retract 释放的页会被别的请求 `set_index_k_scale_buffer` 复用，若不同步 offload 索引缓存，resume 时会恢复 latent 却留下**别人的 index/scale**，导致 DSA 注意力读到错位的垃圾数据
+
+**`quant_block_size = 128` 与 fp8 量化存储**：
+
+`quant_block_size`（L3010）是 FP8 量化 KV 时的分块大小。fp8 精度有限，直接把 512 维 latent KV 存为 fp8 会损失精度。做法是按每 128 维切一个 block，每个 block 独立算一个 fp32 scale：
+
+```
+kv_lora_rank = 512, quant_block_size = 128 → 4 个 block
+
+每 token 的 latent KV 实际存储:
+  block_0: [128B fp8 | 4B fp32 scale]
+  block_1: [128B fp8 | 4B fp32 scale]
+  block_2: [128B fp8 | 4B fp32 scale]
+  block_3: [128B fp8 | 4B fp32 scale]
+  rope  : 64 × 2B bf16 = 128B (不量化, 保持精度)
+──────────────────────────────────
+  总共: 4 × 132 + 128 = 656 bytes per token
+```
+
+这就是 `calculate_mla_kv_cache_dim()` 中 `kv_cache_dim = kv_lora_rank + kv_lora_rank//128*4 + rope*2 = 656` 的来源。无量化时 `kv_cache_dim = 512 + 64 = 576`（纯 bf16），量化后多了 80 字节的 scale 开销，但 dtype 从 bf16(2B) 降到 uint8(1B)，总显存仍大幅减少。
+
+**`kv_cache_dim` 的三层赋值链**——从调用方计算到 DSA 判断到父类最终赋值：
+
+```
+① calculate_mla_kv_cache_dim()                    model_runner_kv_cache_mixin.py:245
+   │  is_dsa_model=True, kv_cache_dtype=fp8, CUDA, 非TRTLLM
+   └─→ return 656   (override 值)
+
+② DSATokenToKVPool.__init__()                     memory_pool.py:3030-3032
+   │  override_dim = 656 if 656 != (512+64) else None → 656
+   └─→ 传给父类 MLATokenToKVPool
+
+③ MLATokenToKVPool.__init__()                     memory_pool.py:2647-2651
+   │  dsa_kv_cache_store_fp8 = (use_dsa=True and dtype==fp8 and override!=None)
+   │                        = True
+   │  self.kv_cache_dim = override_kv_cache_dim → 656
+   └─→ kv_buffer shape: [tokens, 1, 656]
+```
+
+**DSA + BF16 场景**（存在但少见）：不启用 fp8 量化时，`calculate_mla_kv_cache_dim()` 跳过量化的 L280 分支，直接返回 L291 的 `kv_cache_dim = 576`。此时 `override_dim = None`（因为 576 == 576），`dsa_kv_cache_store_fp8 = False`，最终 `kv_cache_dim = 576`。DSA 索引 K 也按 bf16 存储（不量化）。推理场景中 DSA 模型基本都是 FP8 部署——BF16 仅用于调试或精度敏感场景。
+
+**Block 量化的核心——为什么 scale 用 fp32、数据用 fp8**：
+
+量化不是每个值单独配一个 scale，而是 **128 个值共享一个 fp32 scale**：
+
+```
+无量化 (bf16):  128 个值 × 2 字节 = 256 字节
+Block 量化:     128 个值 × 1 字节(fp8) + 1 个 scale × 4 字节(fp32) = 132 字节
+节省: 256 - 132 = 124 字节 (48%)
+```
+
+如果每个值单独带 scale：`128 × (1 + 4) = 640` 字节，比 bf16 的 256 字节还大——**必须共享 scale 才能省显存**。
+
+scale 用 fp32 而非 fp8 的原因：量化还原是 `value_fp8 × scale = restored_value`，scale 是乘法因子。如果 scale 也是 fp8（3-4 位精度），还原时 scale 自身的误差被乘法放大到所有 128 个值上——精度损失叠加。fp32 有 7 位有效精度，scale 的误差可忽略。
+
+block_size=128 的选择：太大 → scale 覆盖范围过大，block 内数值动态范围差异大，量化误差高；太小 → scale 开销占比高（如 block_size=32，开销 4/36=11% vs 4/132=3%）。128 是 DeepSeek 实验得出的平衡点。
+
+写入和读取流程：
+
+```python
+# 写入时量化:
+block_max = max(abs(values[0:128]))
+scale = block_max / 448.0          # fp32
+store = (values / scale).to(fp8)   # → k_buffer (128 bytes, uint8)
+scale_buffer[block_idx] = scale    # → scale_buffer (4 bytes, fp32)
+
+# 读取时还原:
+restored = k_buffer[...].float() * scale  # fp8 → fp32 还原
+```
+
+**`index_k_with_scale_buffer` 的物理布局**（L3072-3091）：
+
+DSA 索引 K 也按 `quant_block_size=128` 分块量化，但存储方式与 latent KV 不同——按**页**组织而非按 token：
+
+```python
+shape = (
+    (index_buf_size + page_size + 1) // page_size,   # 页数
+    page_size * (index_head_dim + index_head_dim // quant_block_size * 4)
+    #           └── 128 ──┘   └──── 128//128*4 = 4 ────┘
+)
+# GLM-5.2: (num_pages, 64 × 132) = (num_pages, 8448)
+
+每页 8448 字节布局:
+  ┌──────────────────────────────────────────────────┐
+  │ token_0 fp8_K(128B) │ token_1 fp8_K(128B) │ ...  │ ← 前 8192B (64×128)
+  │ token_63 fp8_K(128B)│                            │
+  ├──────────────────────────────────────────────────┤
+  │ token_0 scale(4B)   │ token_1 scale(4B)   │ ...  │ ← 后 256B (64×4)
+  │ token_63 scale(4B)  │                            │
+  └──────────────────────────────────────────────────┘
+```
+
+K 数据在前、scale 在后，不是交错存放。DSA kernel 扫描索引时一次连续读取 8192 字节的 fp8 K（memory coalesced load），再偏移到尾部读 scale——两次连续读取比 64 次交错读取高效。
+
+**`DSATokenToKVPool.__init__` 入参来源**（13 个参数，分三类）：
+
+| 类别 | 参数 | GLM-5.2 值 | 来源 |
+|---|---|---|---|
+| **模型 config** | `kv_lora_rank` | 512 | `config.json: kv_lora_rank` |
+| | `qk_rope_head_dim` | 64 | `config.json: qk_rope_head_dim` |
+| | `layer_num` | 78 | `config.json: num_hidden_layers` |
+| | `index_head_dim` | 128 | `config.json: index_head_dim` |
+| **CLI/部署** | `dtype` | `float8_e4m3fn` | `--model-path ...-FP8` → 自动匹配 |
+| | `device` | `"cuda"` | GPU 硬件 |
+| | `enable_memory_saver` | `False` | `--enable-memory-saver` |
+| | `start_layer` | 0 | PP=1 时; PP>1 时按 rank 计算 |
+| | `end_layer` | 77 | PP=1 时; PP>1 时按 rank 计算 |
+| **运行时计算** | `size` | ~3.7M | `mem_fraction_static × GPU显存 / 每token字节`（权重显存已扣除） |
+| | `page_size` | 64 | DSA CUDA 强制固定值 |
+| | `kv_cache_dim` | 656 | `calculate_mla_kv_cache_dim()`: lat(512) + scale(16) + rope(128) |
+| | `index_buf_size` | 等于 `size` | 默认与 KV 池容量相同 |
+
+**`size` 的计算——`mem_fraction_static` 如何扣除权重**（`model_runner_kv_cache_mixin.py:115-116`）：
+
+```python
+rest_memory = available_gpu_memory - pre_model_load_memory * (1 - mem_fraction_static)
+```
+
+| 变量 | 含义 | B300 示例 |
+|---|---|---|
+| `pre_model_load_memory` | 加载模型**前**的总空闲显存 | 192 GB |
+| `available_gpu_memory` | 加载权重**后**的剩余显存 | `192 - weight_size` |
+| `mem_fraction_static` | KV pool 的目标占比 | 0.85 |
+
+`pre_model_load_memory × (1 - 0.85)` 是给 CUDA context / workspace 等非静态组件的 slack。`available_gpu_memory` 已扣除权重。两者相减 = 静态预算中扣除 slack 和权重后的余额，就是 KV pool。
+
+```
+┌────────── 192 GB 总显存 ──────────┐
+│ 15% slack │      85% static       │
+│  28.8 GB  │       163.2 GB         │
+│           ├──────────┬─────────────┤
+│           │  权重    │  KV pool    │
+│           │  ~110 GB │   ~53 GB    │
+└───────────┴──────────┴─────────────┘
+```
+
+如果权重过大导致 `rest_memory ≤ 0`（L122），会抛错并提示上调 `--mem-fraction-static`。
 
 ---
 
@@ -1981,7 +2165,7 @@ pp_cache_group: Optional[torch.distributed.ProcessGroup] = None
 
 ### 3.5 [GLM-5.2 适配] DSA 稀疏注意力的 token_mask 选择性 KV 生成
 
-**定位**：DSA（Dense-Sparse Attention）把模型层分为 Dense 和 Sparse 两类。Dense 层所有 token 参与 attention（标准 MHA/MLA 生成），Sparse 层只有 Top-K 个 token 参与 attention——其余 token 的 KV 不需被完整读取，也不需维护索引 KV。这为 KV 生成阶段引入"选择性生成"的优化空间。以下基于 SGLang 已有的 `DSATokenToKVPool`（`memory_pool.py:3009`）基础设施进行推演。
+**定位**：DSA（DeepSeek-Sparse-Attention）把模型层分为 Dense 和 Sparse 两类。Dense 层所有 token 参与 attention（标准 MHA/MLA 生成），Sparse 层只有 Top-K 个 token 参与 attention——其余 token 的 KV 不需被完整读取，也不需维护索引 KV。这为 KV 生成阶段引入"选择性生成"的优化空间。以下基于 SGLang 已有的 `DSATokenToKVPool`（`memory_pool.py:3009`）基础设施进行推演。
 
 **DSA 的 KV 生成与标准 MLA 的差异**：
 
@@ -3299,7 +3483,7 @@ if new_swa_evicted_seqlen > req.swa_evicted_seqlen:
 
 **关键澄清**：DSA 的 "Sparse" 不是 "SWA"——SWA 是**位置滑动窗口**（只看最近 W 个 token），DSA 是**注意力稀疏**（所有 token 中只选 Top-K 个做 attention）。两者可以共存：SWA 决定"哪些 token 的 KV 还在 SWA 池里"，DSA 决定"SWA 池里的 token 中哪些真正参与 attention"。详见 8.8 节 GLM-5.2 的综合推演。
 
-### 8.3 DSA（Dense-Sparse Attention）稀疏窗口机制
+### 8.3 DSA（DeepSeek-Sparse-Attention）稀疏窗口机制
 
 - 8.3.1 Dense Layer + Sparse Layer 交替架构下的双缓存设计
 
@@ -4126,4 +4310,40 @@ is_deepseek_dsa()=True && use_mla_backend=True
 - latent KV：`128K × 576 × 78` ≈ **5.4 GB**（所有 78 层）
 - 索引 KV：`128K × (128+4) × 21` ≈ **0.35 GB**（仅 21 个 full 索引层）
 - 总计 ≈ **5.75 GB**
+
+### A.5 GLM-5.2 生产部署命令参考
+
+**部署条件**：B300 GPU × 8、FP8 量化、Balanced 模式、单机（SingleNode）。
+
+```bash
+sglang serve \
+  --model-path zai-org/GLM-5.2-FP8 \
+  --tp 8 \
+  --dp 8 \
+  --enable-dp-attention \
+  --moe-a2a-backend deepep \
+  --speculative-algorithm EAGLE \
+  --speculative-num-steps 1 \
+  --speculative-eagle-topk 1 \
+  --speculative-num-draft-tokens 2 \
+  --mem-fraction-static 0.85 \
+  --chunked-prefill-size 32768 \
+  --max-running-requests 256 \
+  --host 0.0.0.0 \
+  --port 30000
+```
+
+**参数与 KV Cache 的关系**：
+
+| 参数 | 值 | 对 KV Cache 的影响 |
+|---|---|---|
+| `--model-path` | `zai-org/GLM-5.2-FP8` | FP8 量化权重；KV cache 对应使用 fp8 存储（`store_dtype=uint8`） |
+| `--tp 8 --dp 8` | TP=8 × DP=8 = 64 卡 | TP 按 head 切 KV（每 rank 64/8=8 heads），DP 各副本独立 KV 池 |
+| `--enable-dp-attention` | DP 间 attention 通信 | KV 读取需跨 DP rank 同步 |
+| `--moe-a2a-backend deepep` | DeepEP all-to-all | MoE FFN 路由，**不影响 KV** |
+| `--speculative-algorithm EAGLE` | EAGLE 投机解码 | 每步 draft token 数 = 1×1=1（`topk=1, steps=1`），`alloc_reserve_per_decode=2` |
+| `--speculative-num-draft-tokens 2` | 最多 2 个 draft token | `get_alloc_len_per_decode` 取 `max(1×1, 2)=2` |
+| `--mem-fraction-static 0.85` | 85% 显存给 KV pool | B300 单卡 ~192GB → KV pool ≈ 163 GB |
+| `--chunked-prefill-size 32768` | 32K chunk | 1M 上下文需 ~32 个 chunk，`req_pool_idx` 跨 chunk 复用 |
+| `--max-running-requests 256` | 256 并发 | `req_to_token` 页表 256×1M×4B = 1 GB（仅页表，不含 KV 数据） |
 
