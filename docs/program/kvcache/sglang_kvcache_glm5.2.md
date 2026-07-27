@@ -5,7 +5,7 @@
 
 SGLang 相较于 vLLM 最大架构革新是 **RadixTree（基数树）全局前缀 KV 共享机制**，结合三层内存池（`ReqToTokenPool` → `TokenToKVPoolAllocator` → `KVCache`）、精细化请求级元数据管理、**跨设备 KV 传输链路**（GPU↔CPU offload、Disaggregation PD、HiCache 多后端存储），实现了「计算复用+显存复用+跨设备数据流转+硬件层级扩容」四重优化。
 
-> **源码版本说明**：本文基于 SGLang `release/v0.5.15` 分支源码分析。GLM-5.2 模型适配代码已部分合入该分支（MTP index sharing、NVFP4 等），文中涉及 GLM-5.2 未合入部分的适配分析属于架构推演，与已验证机制严格区分标注。GLM-5.2 所依赖的 **DSA 稀疏注意力、MLA 低秩压缩 KV、DeepSeek V4 HiSparse 等基础设施已在 SGLang 代码库中存在**，可据此推演 GLM-5.2 的适配路径。
+> **源码版本说明**：本文基于 SGLang `release/v0.5.15` 分支源码分析。GLM-5.2 的 `GlmMoeDsaForCausalLM` 架构已在该分支注册，MTP index sharing、NVFP4 等特性已合入。KV 物理池通过 `DSATokenToKVPool` 直接复用，与 DeepSeek-V3.2 共享同一套基础设施。GLM-5.2 所依赖的 **DSA 稀疏注意力、MLA 低秩压缩 KV、DeepSeek V4 HiSparse 等基础设施已在 SGLang 代码库中存在**，可据此推演 GLM-5.2 的适配路径。
 
 本文将从**底层数据结构 → RadixCache 前缀共享内核 → KV 完整生命周期 → 跨设备 KV Cache 传输专项 → HiCache 多级缓存工程扩容 → 源码路径导读 → 性能与展望**逐层递进，完成 SGLang KV 全套技术栈深度拆解。
 
@@ -68,7 +68,7 @@ SGLang 相较于 vLLM 最大架构革新是 **RadixTree（基数树）全局前�
     - [8.1 SGLang 中已有的非标准 KV Cache 实现全景](#81-sglang-中已有的非标准-kv-cache-实现全景)
     - [8.2 MLA（Multi-Head Latent Attention）KV Cache 存储对比分析](#82-mlamulti-head-latent-attentionkv-cache-存储对比分析)
     - [8.2.5 SWA（Sliding Window Attention）混合双池架构](#825-swasliding-window-attention混合双池架构)
-    - [8.3 DSA（DeepSeek-Sparse-Attention）稀疏窗口机制](#83-dsadense-sparse-attention稀疏窗口机制)
+    - [8.3 DSA（DeepSeek-Sparse-Attention）稀疏窗口机制](#83-dsadeepseek-sparse-attention稀疏窗口机制)
     - [8.4 RoPE 位置编码偏移引发的索引修正原理](#84-rope-位置编码偏移引发的索引修正原理)
     - [8.5 Continuous Batch 动态批处理资源调度](#85-continuous-batch-动态批处理资源调度)
     - [8.6 FP8 量化 KV Cache：`store_dtype=torch.uint8` 的数值对齐与精度兼容](#86-fp8-量化-kv-cachestore_dtypetorchuint8-的数值对齐与精度兼容)
@@ -589,7 +589,7 @@ alloc_for_extend()                        (common.py:452)
   └── write_cache_indices()              把 select_index 写入 req_to_token 页表
 
 释放:
-release_kv_cache()                        (common.py:695)
+release_kv_cache()                        (common.py:635)
   │
   ├── 从 req_to_token[req_pool_idx] 读出待释放的物理 slot
   │
@@ -954,6 +954,41 @@ K 数据在前、scale 在后，不是交错存放。DSA kernel 扫描索引时�
 | | `kv_cache_dim` | 656 | `calculate_mla_kv_cache_dim()`: lat(512) + scale(16) + rope(128) |
 | | `index_buf_size` | 等于 `size` | 默认与 KV 池容量相同 |
 
+
+**`size` 的完整计算链路**（从 `ModelRunner.__init__` 到 `DSATokenToKVPool` 构造）：
+
+```
+ModelRunner.__init__()                          model_runner.py:350
+  └─ self.init_memory_pool(pre_model_load_memory)  model_runner.py:846
+       │
+       ├─ _resolve_memory_pool_config(pre)      model_runner_kv_cache_mixin.py:1295
+       │    │
+       │    ├─ _profile_available_bytes(pre)    model_runner_kv_cache_mixin.py:104
+       │    │    │  available = get_available_gpu_memory()       # 权重加载后剩余
+       │    │    │  rest = available - pre × (1-0.85)            # 扣 15% slack
+       │    │    └─ return rest × (1<<30)                        # -> bytes
+       │    │
+       │    ├─ create_memory_pool_configurator(self)
+       │    │    └─ _compute_cell_size(num_layers=78)            pool_configurator.py:175
+       │    │         MLA: (512+64) × 78 × 1 = 44,928
+       │    │         DSA: +(128+4) × 78 × 1 = 10,296
+       │    │         -> cell_size = 55,224 bytes/token
+       │    │
+       │    └─ calculate_pool_sizes(available_bytes, page_size)  pool_configurator.py:270
+       │         max_total_num_tokens = available_bytes // 55,224
+       │         max_total_num_tokens = // 64 × 64               # page 对齐
+       │         -> MemoryPoolConfig(max_total_num_tokens=size)
+       │
+       └─ _apply_memory_pool_config(config)     model_runner_kv_cache_mixin.py:1264
+            └─ _init_pools()                    model_runner_kv_cache_mixin.py:503
+                 └─ self.token_to_kv_pool = DSATokenToKVPool(
+                        size=config.max_total_num_tokens,         ← 这就是 size
+                        ...
+                    )
+```
+
+`size` 的本质是 **token 计数**（不是字节数），计算公式：`size = (GPU 可用字节 - slack) ÷ (每 token 字节)`，分子来自 `_profile_available_bytes`（已扣权重和 slack），分母来自 `_compute_cell_size`（MLA latent + DSA index），最后 `// page_size × page_size` 做 64 对齐。
+
 **`size` 的计算——`mem_fraction_static` 如何扣除权重**（`model_runner_kv_cache_mixin.py:115-116`）：
 
 ```python
@@ -979,6 +1014,41 @@ rest_memory = available_gpu_memory - pre_model_load_memory * (1 - mem_fraction_s
 ```
 
 如果权重过大导致 `rest_memory ≤ 0`（L122），会抛错并提示上调 `--mem-fraction-static`。
+
+**`size`（token 数）的计算--`cell_size` 估算 vs 实际 `kv_cache_dim`**：
+
+`size = available_bytes / cell_size`，其中 `cell_size` 是每 token 占用字节数。但估算和实际分配用了不同值：
+
+| | cell_size / kv_cache_dim | 用途 | 代码位置 |
+|---|---|---|---|
+| **估算值** | `(512+64) × 78 = 44,928` | 配置阶段换算 token 数 | `pool_configurator.py:185-189` |
+| **真实值** | `(512+16+128) × 78 = 51,168` | 物理张量分配 | `memory_pool.py:2674` |
+
+```python
+# pool_configurator.py:184-189 (MLA 路径，cell_size 估算)
+if mr.use_mla_backend:
+    cell_size = (kv_lora_rank + qk_rope_head_dim) * num_layers * kv_size
+              = (512 + 64) * 78 * 1 = 44,928        # ← 少算了 fp8 scale (16B × 78)
+```
+
+估算时 MLA 路径只算 raw 布局 `kv_lora_rank + qk_rope_head_dim = 576`，没算 fp8 scale。这是有意的近似--配置阶段只需快速换算 token 数，后续 `_apply_token_constraints`（L1301）会做安全余量兜底。
+
+而实际张量分配走 `calculate_mla_kv_cache_dim()` 返回 `656`（含 scale），`kv_buffer` 真实按 656 分配。两者差异 `16 × 78 = 1248` 字节/token，约 2%，被安全余量吸收。
+
+DSA 索引部分同理：估算用 `128+4 = 132`，实际也是 `132`（这部分代码一致）。完整每 token 字节（GLM-5.2 FP8 DSA）：
+
+```
+真实 cell_size = MLA latent + DSA index
+              = (512 + 16 + 128) + (128 + 4)
+              = 656 + 132 = 788 bytes per token (每层)
+
+完整每 token (78 层):
+  MLA:  656 × 78 = 51,168
+  Index: 132 × 78 = 10,296
+  合计: 61,464 bytes per token
+```
+
+实际部署时 KV 显存占用按 `size × 656 × 78`（MLA 部分）+ `size × 132 × 78`（index 部分）计算，真实每 token 字节 61,464 比估算的 `55,224` 多约 11%--估算偏乐观，但 `mem_fraction_static=0.85` 的 15% slack + `_apply_token_constraints` 兜底足以覆盖。
 
 ---
 
@@ -1213,8 +1283,6 @@ def create_flashinfer_kv_indices_triton(
 
 **`time_stats`** — `SchedulerReqTimeStats` 对象在 `Req.__init__` 创建时打 `scheduler_recv_time`，后续各阶段（queue/prefill/decode/finish）打点，供 metrics 和 debug 用。
 
-`kv_allocated_len - kv_committed_len` 是该请求的"悬空 slot"——spec decode 中已被分配但尚未验证的 draft token slot。`release_kv_cache` 先调 `cache_finished_req` 把已确认 KV 插树，再调 `pop_overallocated_kv_cache` 释放悬空 slot，最后 `req_to_token_pool.free(req)` 归还行号。这一"确认→插树→释放悬空→归还行号"的四段释放确保不会有内存泄漏。
-
 `kv_allocated_len - kv_committed_len` 就是该请求的"悬空 slot"——spec decode 中已被分配但尚未验证的 draft token slot。`release_kv_cache`（`common.py:635`）先调 `cache_finished_req` 把已确认 KV 插树，再调 `pop_overallocated_kv_cache` 释放悬空 slot，最后 `req_to_token_pool.free(req)` 归还行号。这一"确认→插树→释放悬空→归还行号"的四段释放确保不会有内存泄漏。
 
 - 1.4.2 前缀缓存维度：`prefix_indices`、`num_matched_prefix_tokens`、`host_hit_length`、`cache_protected_len`
@@ -1242,7 +1310,7 @@ def create_flashinfer_kv_indices_triton(
 
 **`best_match_node`** — 供 HiCache 的 `init_load_back` 锚定 load-back 来源节点。
 
-`cache_protected_len` 是"防泄漏"的关键。`page_size>1` 下，partial page 尾部的 slot 被写入页表供 attention 读取，但由于长度不满足 page 对齐，不能插入 RadixTree——它们被记到 `cache_protected_len` 的额外尾部，在下一次 `cache_unfinished_req` 和最终 `cache_finished_req` 中释放（见 `radix_cache.py:533-537` 的注释）。这个机制防止"页表里引用了但树里没记录"的 slot 永远无法回收。
+`cache_protected_len` 是"防泄漏"的关键。`page_size>1` 下，partial page 尾部的 slot 被写入页表供 attention 读取，但由于长度不满足 page 对齐，不能插入 RadixTree——它们被记到 `cache_protected_len` 的额外尾部，在下一次 `cache_unfinished_req` 和最终 `cache_finished_req` 中释放（见 `radix_cache.py:528-537` 的注释）。这个机制防止"页表里引用了但树里没记录"的 slot 永远无法回收。
 
 - 1.4.3 SWA 维度：`swa_evicted_seqlen`、`sliding_window_size`
 
@@ -1250,7 +1318,7 @@ def create_flashinfer_kv_indices_triton(
 - **RadixCache**：`[cache_protected_len, swa_evicted_seqlen)` 的 KV 由 `ScheduleBatch.maybe_evict_swa` 手动释放；`[0, cache_protected_len)` 由 radix cache 淘汰时释放。
 - **ChunkCache**：`[0, swa_evicted_seqlen)` 全部由 `maybe_evict_swa` 手动释放。
 
-`free_swa_out_of_window_slots`（`common.py:69`）计算窗口外应淘汰量：`evict_threshold = pre_len - sliding_window_size - page_size`（保留至少一页 margin 供树存储非 tombstone 节点，L95），然后从 `req_to_token[req_pool_idx, swa_evicted_seqlen:new_swa_evicted_seqlen]` 取出 slot 调 `allocator.free_swa` 释放。SWA 池**只释放 slot 映射、不修改页表**（页表仍保留完整 slot 序列供 full attention 层读取），这是通过 `kv_start_idx` 在 flashinfer 转换 kernel 中裁剪窗口实现（1.3.4 节）。
+`free_swa_out_of_window_slots`（`common.py:69`）计算窗口外应淘汰量：`evict_threshold = pre_len - max(sliding_window_size, page_size)`（Radix cache 路径，L97）；Chunk cache 路径为 `pre_len - sliding_window_size`（L94），然后从 `req_to_token[req_pool_idx, swa_evicted_seqlen:new_swa_evicted_seqlen]` 取出 slot 调 `allocator.free_swa` 释放。SWA 池**只释放 slot 映射、不修改页表**（页表仍保留完整 slot 序列供 full attention 层读取），这是通过 `kv_start_idx` 在 flashinfer 转换 kernel 中裁剪窗口实现（1.3.4 节）。
 
 - 1.4.4 生命周期维度：`kv_committed_freed`、`kv_overallocated_freed`、`inflight_middle_chunks`
 
@@ -1274,7 +1342,7 @@ Chunk 2: req_to_token[3, 1024:2048]← prefix match 命中 1024 token（含 Chun
 Chunk 3: req_to_token[3, 2048:3072]← 同上，最终 seq_len = 第 1 章整体 extend 的长度
 ```
 
-`ReqToTokenPool.alloc`（`memory_pool.py:270`）的第一行逻辑就是复用检测：
+`ReqToTokenPool.alloc`（`memory_pool.py:276`）的第一行逻辑就是复用检测：
 
 ```python
 def alloc(self, reqs: list[Req]) -> Optional[List[int]]:
@@ -1292,7 +1360,7 @@ def alloc(self, reqs: list[Req]) -> Optional[List[int]]:
 **chunk 间的 KV 持久化**：每 chunk 结束后调 `cache_unfinished_req`（`radix_cache.py:488`），把本 chunk 新算的 KV slot 插入 RadixTree 使之能被后续 chunk（或其他请求）命中。关键流程（已在第 2 章阐述，此处聚焦 chunked 视角）：
 
 1. `cache_unfinished_req` 插入新 KV 到树 → 树返回更新后的 `new_indices`
-2. `self.req_to_token_pool.write(...)` 把页表行中受保护段刷新为树返回的新 slot 映射（`radix_cache.py:533`）
+2. `self.req_to_token_pool.write(...)` 把页表行中受保护段刷新为树返回的新 slot 映射（`radix_cache.py:528`）
 3. `req.cache_protected_len = len(new_indices)` 更新受保护长度
 4. `req.prefix_indices` 设为 `new_indices + 未进树的 tail`（`radix_cache.py:545-550`）
 5. `inc_lock_ref(new_last_node)` 锁住新节点，`dec_lock_ref(req.last_node)` 释放旧节点
@@ -1318,7 +1386,7 @@ self.req_pool_indices = self._pad_tensor_to_size(self.req_pool_indices, bs)
 
 **两道门互锁保证 padding 和数据区隔离**：
 
-逻辑层（页表）：`ReqToTokenPool` 的 `_alloc_size = size + 1`（`memory_pool.py:247`），`free_slots = list(range(1, _alloc_size))`，索引 0 永远不被分配。`req_to_token[0, :]` 全零初始化后从未被 `write_cache_indices` 覆盖——没有任何真实请求能拿到 `req_pool_idx = 0`。
+逻辑层（页表）：`ReqToTokenPool` 的 `_alloc_size = size + 1`（`memory_pool.py:261`），`free_slots = list(range(1, _alloc_size))`，索引 0 永远不被分配。`req_to_token[0, :]` 全零初始化后从未被 `write_cache_indices` 覆盖——没有任何真实请求能拿到 `req_pool_idx = 0`。
 
 物理层（显存）：`TokenToKVPoolAllocator` 的 `free_pages = torch.arange(1, size + 1)`（`allocator/token.py:44`），slot 0 永远不在空闲池。`alloc()` 绝不返回 slot 0。`set_kv_buffer` 被真实请求调用时 `loc` 绝不可能是 0。
 
@@ -1611,7 +1679,7 @@ def _split_node(self, key, child, split_len):
 
 - 2.5.2 后缀增量生成叶子节点延伸与 Insert 挂载
 
-`insert()`（`radix_cache.py:415`）调 `_insert_helper`（L709）。它先沿已有前缀走（必要时同样分裂），走到 key 剩余非空且无对应 child 时，**新建叶子挂载**：
+`insert()`（`radix_cache.py:415`）调 `_insert_helper`（L704）。它先沿已有前缀走（必要时同样分裂），走到 key 剩余非空且无对应 child 时，**新建叶子挂载**：
 
 ```python
 # _insert_helper 末尾（L749）
@@ -1689,7 +1757,7 @@ TokenToKVPoolAllocator(分配层) ← free(value) 把 slot 还回 free_pages；a
 KVCache (物理层)              ← 真正的 K/V 显存，set_kv_buffer / get_key_buffer 读写
 ```
 
-`cache_finished_req`（`radix_cache.py:437`）是最完整的链路示例：请求结束时，把 `req_to_token_pool.req_to_token[req_pool_idx, :kv_committed_len]` 读出作为该请求的全部 slot，构造成 `RadixKey` 插入树（`insert` 带走引用），**重复部分的 slot 立即 `free`**（`kv_indices[cache_protected_len:result.prefix_len]`，L475），未对齐尾部也 `free`（L485）。插入树的那段 slot 的所有权从"请求"转移给"树节点"。
+`cache_finished_req`（`radix_cache.py:437`）是最完整的链路示例：请求结束时，把 `req_to_token_pool.req_to_token[req_pool_idx, :kv_committed_len]` 读出作为该请求的全部 slot，构造成 `RadixKey` 插入树（`insert` 带走引用），**重复部分的 slot 立即 `free`**（`kv_indices[cache_protected_len:result.prefix_len]`，L470），未对齐尾部也 `free`（L480）。插入树的那段 slot 的所有权从"请求"转移给"树节点"。
 
 - 2.6.2 `PrefixCacheTrait` 协议：`req_to_token_pool` + `token_to_kv_pool_allocator` + `page_size`
 
@@ -1839,7 +1907,7 @@ def _update_leaf_status(self, node):
 
 - **树内存泄漏**：`cache_protected_len` 机制（L538-542）专为 `page_size>1` 设计——partial page 的 slot 被加进 `req.prefix_indices` 但**未进树**，必须在下一次 `cache_unfinished_req` 和最终 `cache_finished_req` 里释放，否则泄漏。`write_through_pending_id` 未正确清理则会让主机侧数据无法回收。
 
-- **共享缓存脏数据**：DSA 池的 `index_k_with_scale_buffer`（第 1 章 1.2.3）在 retract 释放页后被别的请求复用，若 `get_cpu_copy` 没同步卸载 index 缓存，resume 时会恢复 latent 却留下别家的 index/scale（`memory_pool.py:3184-2709` 注释）。`ReqToTokenPool` 索引 0 padding 约定、`maybe_detect_oob` 越界检查都是防 stale slot id 写入造成静默脏数据。
+- **共享缓存脏数据**：DSA 池的 `index_k_with_scale_buffer`（第 1 章 1.2.3）在 retract 释放页后被别的请求复用，若 `get_cpu_copy` 没同步卸载 index 缓存，resume 时会恢复 latent 却留下别家的 index/scale（`memory_pool.py:3184-3189` 注释）。`ReqToTokenPool` 索引 0 padding 约定、`maybe_detect_oob` 越界检查都是防 stale slot id 写入造成静默脏数据。
 
 - **并发安全**：`RadixCache` 通过调度器串行化访问（单 scheduler 线程）、`HiRadixCache` 的 `ongoing_write_through`/`ongoing_load_back` 字典追踪异步操作，避免 match/evict 与后台传输竞争。分布式场景下 `HiRadixCache` 用 `_all_reduce_attn_groups` / `_pp_sync` 在 TP/PP 组间同步淘汰决策。
 
@@ -1881,8 +1949,6 @@ def pop_overallocated_kv_cache(self):
     self.kv_overallocated_freed = True
     return self._cache_commit_len(), self.kv_allocated_len
 ```
-
-每步 target verify 后，target model 接受 N 个 draft token（N ≤ topk × steps）。`kv_committed_len += N`，但 `kv_allocated_len` 仍等于分配时的总量。差值 `kv_allocated_len - kv_committed_len` 对应被拒绝的 draft token 所占的 slot——这些 slot 在 `release_kv_cache` → `pop_overallocated_kv_cache` → `allocator.free(indices_to_free)` 中被释放。
 
 **EAGLE 对 RadixTree 的关键操作**（bigram 核心已在 2.3.1 详述，此处补充 KV 流转视角）：
 
@@ -2091,7 +2157,7 @@ MLA 的 TP 处理（`MLATokenToKVPool`）：`head_num=1`，latent 共享而非�
 
 **PP（Pipeline Parallelism）—— 按 layer 隔离 KV**：
 
-各 PP rank 只持有自己负责的模型层的 KV。`KVCache.start_layer`/`end_layer`（`memory_pool.py:1214-1002`）控制：
+各 PP rank 只持有自己负责的模型层的 KV。`KVCache.start_layer`/`end_layer`（`memory_pool.py:1214-1215`）控制：
 
 ```python
 self.start_layer = start_layer or 0
@@ -2165,7 +2231,7 @@ pp_cache_group: Optional[torch.distributed.ProcessGroup] = None
 
 ### 3.5 [GLM-5.2 适配] DSA 稀疏注意力的 token_mask 选择性 KV 生成
 
-**定位**：DSA（DeepSeek-Sparse-Attention）把模型层分为 Dense 和 Sparse 两类。Dense 层所有 token 参与 attention（标准 MHA/MLA 生成），Sparse 层只有 Top-K 个 token 参与 attention——其余 token 的 KV 不需被完整读取，也不需维护索引 KV。这为 KV 生成阶段引入"选择性生成"的优化空间。以下基于 SGLang 已有的 `DSATokenToKVPool`（`memory_pool.py:3009`）基础设施进行推演。
+**定位**：DSA（DeepSeek-Sparse-Attention）的 sparse 层只对 Top-K 个 token 做 attention，其余 token 的 KV 不需被完整读取。这为 KV 生成阶段引入"选择性生成"的优化空间。以下基于 SGLang 已有的 `DSATokenToKVPool`（`memory_pool.py:3009`）基础设施进行推演。注意：GLM-5.2 的 78 层全部使用 DSA（详见 8.8 节），DeepSeek-V3.2 则是 dense/sparse 分层。
 
 **DSA 的 KV 生成与标准 MLA 的差异**：
 
@@ -2227,7 +2293,7 @@ DSA 的 index KV 本身是**按页**组织的（`page_size=64` on CUDA），每�
 SGLang 已有完整的 DSA 物理池（`DSATokenToKVPool`）+ 索引读写 API（`index_buf_accessor.SetKAndS` / `GetK` / `GetS` / `GetKAndS`）。GLM-5.2 的适配分两层：
 
 1. **物理层（零改动）**：`DSATokenToKVPool` 已被 DeepSeek V3.2 验证，`page_size=64`（CUDA）约束只管平台兼容，GLM-5.2 直接复用。
-2. **Attention Backend（需新增）**：需要一个 DSA attention backend，在 Sparse 层 forward 中：
+2. **Attention Backend（已存在）**：DSA attention backend 已存在于 `layers/attention/dsa/`（`DeepseekSparseAttnBackend`），在 Sparse 层 forward 中：
    - 产出 token_mask（决定哪些 token 算索引）
    - 按 mask 收集 `index_k` / `index_k_scale` 的 `loc`（有效 token 的 slot 序列）
    - 调 `set_index_k_scale_buffer(layer_id, loc, index_k, index_k_scale)` 写入
@@ -2379,7 +2445,8 @@ Hybrid SWA 模型下 full 池和 SWA 池各有一套 slot 空间。`maybe_evict_
 
 ```python
 # common.py:69 free_swa_out_of_window_slots
-evict_threshold = pre_len - sliding_window_size - page_size  # 保留 margin
+evict_threshold = pre_len - max(sliding_window_size, page_size)  # Radix cache
+        # Chunk cache: pre_len - sliding_window_size
 new_swa_evicted_seqlen = max(req.swa_evicted_seqlen, evict_threshold)
 if new_swa_evicted_seqlen > req.swa_evicted_seqlen:
     free_slots = req_to_token_pool.req_to_token[
@@ -2576,7 +2643,7 @@ SWA 截断在写入前发生：`free_swa_out_of_window_slots`（`common.py:69`�
 |---|---|---|
 | 长上下文分段 | chunked prefill + `set_kv_buffer_prefix_valid` | 零改动（config 设 `chunked_prefill_size`） |
 | DSA 索引写入（full 层） | `DSATokenToKVPool.set_index_k_scale_buffer` | 零改动（DSA backend 通用） |
-| DSA 索引复用（shared 层） | 复用同组 full 层 index buffer，不额外写入 | attention backend 需新增 shared index lookup |
+| DSA 索引复用（shared 层） | 复用同组 full 层 index buffer，不额外写入 | attention backend 需配置 shared index lookup（backend 已有 indexer 逻辑） |
 | MLA latent 写入 | `DSATokenToKVPool.set_mla_kv_buffer`（继承自 MLA） | 零改动（MLA backend 通用） |
 
 综合：GLM-5.2 的长上下文写入完全复用 SGLang 已有 chunked prefill + DSA/MLA 写入基础设施。物理池侧的 `DSATokenToKVPool`、`index_buf_accessor` 无需改动——GLM-5.2 和 DeepSeek-V3.2 共享同一套 DSA 写入路径。
@@ -2944,7 +3011,7 @@ HostKVCache (CPU pinned)  ──PCIe DMA──→  KVCache (GPU)
    ↑
    cache_controller.load(host_indices)
      └─ KVCache.load_cpu_copy(kv_cache_cpu_dict, indices)
-          └─ memory_pool.py:1591 逐层 chunk-by-8192 H2D DMA
+          └─ memory_pool.py:1631 逐层 chunk-by-8192 H2D DMA
 ```
 
 **L3 部分命中（`storage_hit_length > 0`）—— 异步预取或重算**：
@@ -2977,7 +3044,7 @@ Q_pos = cache_protected_len + token_offset          ← 新 token 的位置从 p
 K_pos = 0, 1, ..., seq_len - 1                      ← 完整序列位置（含前缀部分）
 ```
 
-`Req.cache_protected_len`（第 1 章 1.4.2）记录本请求复用了多少 token。Attention backend 的 `init_forward_metadata` 用此值 + `seq_lens` 为每个 token 分配位置 ID。GLM-5.2 若采用双位置 RoPE（区分 self-attention position 和 cross-attention position），只需在 backend 中扩展位置 ID 计算逻辑——物理池和页表不变。
+`Req.cache_protected_len`（第 1 章 1.4.2）记录本请求复用了多少 token。Attention backend 的 `init_forward_metadata` 用此值 + `seq_lens` 为每个 token 分配位置 ID。GLM-5.2 采用双位置 RoPE（config.json 中 `rope_interleave=true`）（区分 self-attention position 和 cross-attention position），只需在 backend 中扩展位置 ID 计算逻辑——物理池和页表不变。
 
 **DSA 稀疏 Token 精准读取（两阶段）**：
 
@@ -3097,7 +3164,7 @@ VIP 请求（`priority=100`）的前缀路径上所有节点都被"拉高"到 10
 `free_swa_out_of_window_slots`（`common.py:69`）是 SWA 层淘汰的精确入口。它判断当前 token 位置 `pre_len` 超过滑动窗口 `sliding_window_size` 后，把窗口外的 slot 强制释放：
 
 ```python
-evict_threshold = pre_len - sliding_window_size - page_size  # 默认保留一个 page margin
+evict_threshold = pre_len - max(sliding_window_size, page_size)  # Radix cache 路径
 new_swa_evicted_seqlen = max(req.swa_evicted_seqlen, evict_threshold)
 if new_swa_evicted_seqlen > req.swa_evicted_seqlen:
     free_slots = req_to_token_pool.req_to_token[
@@ -3107,7 +3174,7 @@ if new_swa_evicted_seqlen > req.swa_evicted_seqlen:
     req.swa_evicted_seqlen = new_swa_evicted_seqlen
 ```
 
-关键设计点：`swa_evicted_seqlen` 是惰性推进——每步 decode/extend 时才检查是否需要滚窗，窗口超出量一次释放。默认保留一个 `page_size` margin（`drop_page_margin=False` 不丢弃 margin，L92-95），确保始终有一页 SWA KV 在滑动窗口外保留在树里作为非 tombstone 节点，防止多轮对话场景下的 SWA 内存泄漏（与 `swa_radix_cache.py` 的 `_insert_helper` case 3 联动，注释见 L88-91）。
+关键设计点：`swa_evicted_seqlen` 是惰性推进——每步 decode/extend 时才检查是否需要滚窗，窗口超出量一次释放。`evict_threshold = pre_len - max(sliding_window_size, page_size)`（L97），取 `max(sliding_window_size, page_size)` 确保至少保留一页 SWA KV 在树里作为非 tombstone 节点，防止多轮对话场景下的 SWA 内存泄漏（与 `swa_radix_cache.py` 的 `_insert_helper` case 3 联动，注释见 L88-91）。
 
 `maybe_evict_swa`（`schedule_batch.py:2864`）在 batch 级控制触发：decode 模式下记录 `swa_maintenance_step` 按 `SGLANG_SWA_EVICTION_INTERVAL`（默认 1）控制频率，避免每步都查；overlap 模式下 req 的 `decode_batch_idx>=1` 才触发（确保前一个 extend batch 已完成）。同时有一个优化路径 `SGLANG_OPT_SWA_RELEASE_LEAF_LOCK_AFTER_WINDOW`：decode 位置滑出窗口后把 SWA 部分的树锁降级（`dec_swa_lock_only` (`schedule_batch.py:2899`)），让 SWA evictable 叶子可在 LRU 压力下被回收。
 
@@ -3177,7 +3244,7 @@ def release_kv_cache(req, tree_cache, is_insert=True):
 
 - 7.1.1 GPU↔CPU 请求级 Offload：`Req.offload_kv_cache()` / `load_kv_cache()`
 
-单个请求的 KV 从 GPU 搬移到 CPU 内存，对应 `KVCache.get_cpu_copy()` / `load_cpu_copy()`（`memory_pool.py:1602/1364`）。用于两个场景：（1）`TorchMemorySaverAdapter` 的显存压缩——请求排队期间暂时 offload 到 CPU 释放 GPU 压力；（2）PD 分离式 decode 端的 KV 暂存——prefill 生成后把 KV 卸载到 CPU，decode 端按需加载。
+单个请求的 KV 从 GPU 搬移到 CPU 内存，对应 `KVCache.get_cpu_copy()` / `load_cpu_copy()`（`memory_pool.py:1602/1624`）。用于两个场景：（1）`TorchMemorySaverAdapter` 的显存压缩——请求排队期间暂时 offload 到 CPU 释放 GPU 压力；（2）PD 分离式 decode 端的 KV 暂存——prefill 生成后把 KV 卸载到 CPU，decode 端按需加载。
 
 - 7.1.2 Prefill→Decode 分离式传输（Disaggregation PD）：NCCL / NIXL 跨节点
 
@@ -3237,7 +3304,7 @@ class DecodeReqToTokenPool:
 | **NIXL** | `nixl/conn.py` | `NixlKVSender` / `NixlKVReceiver` | 跨机点对点，基于 libfabric，绕过 NCCL 的跨机限制 |
 | **mooncake RDMA** | `mooncake/conn.py` | `MooncakeKVSender` / `MooncakeKVReceiver` | 跨机零拷贝，通过 `custom_mem_pool` 直达 GPU 显存 |
 
-每个 `conn.py` 实现统一的 `KVSender` / `KVReceiver` 接口（`send_kv` / `recv_kv`），上层 `DecodeTransferQueue`（`decode.py:1473`）不感知具体传输协议。`custom_mem_pool`（`memory_pool.py:1015`，由 `SGLANG_MOONCAKE_CUSTOM_MEM_POOL` 环境变量开关）为 mooncake 分配独立的 CUDA memory pool，RDMA 传输直接写入该 pool 的 GPU 显存地址——**绕过了 CPU bounce buffer 和 cudaMemcpy D2H/H2D 往返**。
+每个 `conn.py` 实现统一的 `KVSender` / `KVReceiver` 接口（`send_kv` / `recv_kv`），上层 `DecodeTransferQueue`（`decode.py:1473`）不感知具体传输协议。`custom_mem_pool`（`memory_pool.py:1228`，由 `SGLANG_MOONCAKE_CUSTOM_MEM_POOL` 环境变量开关）为 mooncake 分配独立的 CUDA memory pool，RDMA 传输直接写入该 pool 的 GPU 显存地址——**绕过了 CPU bounce buffer 和 cudaMemcpy D2H/H2D 往返**。
 
 mooncake 路径的延迟优势：NCCL 在跨机时先 cudaMemcpy D2H → CPU → socket → H2D（3 次拷贝）；mooncake RDMA 直接从 GPU 显存 RDMA write → 远端 GPU 显存（1 次拷贝）。对于 100K token × 32 layers 的 MLA 潜在 KV（~7.4 GB），NCCL 延时 ~1-3 秒，mooncake RDMA 延时 ~10-50ms。
 
@@ -3342,7 +3409,7 @@ DSA 的 `DSATokenToKVPool` 在 offload 时独传 `index_k_with_scale_buffer`。�
 
 - 8.1.1 `MLATokenToKVPool`：MLA 低秩压缩 KV 的专用物理池
 
-`memory_pool.py:2610`。核心约束：只存一个 latent 向量，head_num=1，get_value_buffer 返回 kv_buffer 前半（nope 段），get_key_buffer 返回全 latent。这意味着**所有以下接口需要感知"只有 kv_buffer 一个 buffer"**：`get_contiguous_buf_infos`（L2212 只返回 kv_buffer 的信息而非 K+V 分开）、`set_kv_buffer`（单 buffer 索引赋值而非 K/V 分别写）。
+`memory_pool.py:2610`。核心约束：只存一个 latent 向量，head_num=1，get_value_buffer 返回 kv_buffer 前半（nope 段），get_key_buffer 返回全 latent。这意味着**所有以下接口需要感知"只有 kv_buffer 一个 buffer"**：`get_contiguous_buf_infos`（L2692 只返回 kv_buffer 的信息而非 K+V 分开）、`set_kv_buffer`（单 buffer 索引赋值而非 K/V 分别写）。
 
 - 8.1.2 `DSATokenToKVPool`：DSA 稀疏注意力的专用物理池
 
@@ -3434,7 +3501,7 @@ for wrapper_id in range(2):
 **淘汰：`free_swa_out_of_window_slots`**（`common.py:69`）：
 
 ```python
-evict_threshold = pre_len - sliding_window_size - page_size   # 保留 page margin
+evict_threshold = pre_len - max(sliding_window_size, page_size)   # Radix cache 路径
 new_swa_evicted_seqlen = max(req.swa_evicted_seqlen, evict_threshold)
 if new_swa_evicted_seqlen > req.swa_evicted_seqlen:
     free_slots = req_to_token[req_pool_idx, swa_evicted_seqlen:new_swa_evicted_seqlen]
@@ -3491,7 +3558,7 @@ DSA 模型部分层是全注意力（Dense），部分层是稀疏注意力（Sp
 
 - 8.3.2 `sparsity/` 目录下的稀疏索引与压缩状态管理
 
-`python/sglang/srt/mem_cache/deepseek_v4_compress_state.py` 等文件管理稀疏状态的压缩与同步。DSA 的稀疏路由需要在 forward 后更新 compress state，在下一个 forward 前同步 mask 位置——这些状态与 KV cache 物理池分离但在 attention kernel 内联动：mask 决定从 `kv_buffer` 读取哪些 token、从 `index_k_with_scale_buffer` 的哪些 page 进行 Top-K。
+`python/sglang/srt/layers/attention/dsa/` 目录（`dsa_indexer.py`、`dsa_topk_backend.py`、`triton_kernel.py` 等）管理 DSA 的稀疏索引与 Top-K 路由状态。DSA 的稀疏路由需要在 forward 后更新索引 K，在下一个 forward 前同步 mask 位置--这些状态与 KV cache 物理池分离但在 attention kernel 内联动：mask 决定从 `kv_buffer` 读取哪些 token、从 `index_k_with_scale_buffer` 的哪些 page 进行 Top-K。
 
 ### 8.4 RoPE 位置编码偏移引发的索引修正原理
 
@@ -3604,7 +3671,7 @@ else:
     self.store_dtype = dtype
 ```
 
-FP8 KV 存储用 uint8 做 `index_put`，读写时 view(fp8_dtype) 还原。`set_kv_buffer` 中 `cache_k.div_(k_scale)` 后 quantize 到 fp8，`view(store_dtype)` 写 uint8；`get_key_buffer` 中 `view(dtype)` 从 uint8 回到 fp8。MHATokenToKVPoolFP4 和 MLATokenToKVPoolFP4（`memory_pool.py:2057/2389`）进一步支持 FP4 存储，写入路径需 per-block scale。
+FP8 KV 存储用 uint8 做 `index_put`，读写时 view(fp8_dtype) 还原。`set_kv_buffer` 中 `cache_k.div_(k_scale)` 后 quantize 到 fp8，`view(store_dtype)` 写 uint8；`get_key_buffer` 中 `view(dtype)` 从 uint8 回到 fp8。MHATokenToKVPoolFP4 和 MLATokenToKVPoolFP4（`memory_pool.py:2057/2869`）进一步支持 FP4 存储，写入路径需 per-block scale。
 
 ### 8.7 MoE 专家并行 EP 下多卡 KV 分布与路由
 
@@ -3628,7 +3695,7 @@ GLM-5.2 共 **78 层** attention，**全部使用 DSA**（不是 dense/sparse �
   │     indexer_types 决定哪些层独立维护索引 K:
   │       "full"   : 21 层 (每 4 层一组的第 1 层) — 独立索引
   │       "shared" : 57 层 — 复用同组 full 层的索引
-  │     只有 "full" 的 21 层分配 index buffer
+  │     物理上 78 层都分配 index buffer，但只有 "full" 的 21 层写入数据
   │
   └─ FFN 层 (不产生 KV):
         mlp_layer_types 决定 FFN 类型:
@@ -3658,9 +3725,9 @@ self.token_to_kv_pool = DSATokenToKVPool(
 )
 
 # 注意: 由于 indexer_types 中存在 "shared" 层（57 层复用索引），
-# 实际分配 index_k_with_scale_buffer 的层数可能 < 78。
-# 这需要在 DSATokenToKVPool 的 layer_num 参数中体现。
-```
+# 实际分配: index_k_with_scale_buffer 按 layer_num=78 分配所有层，
+# 但只有 "full" 的 21 层会被写入索引数据。
+# layer_num 参数不受 indexer_types 影响。
 
 **MLA 与 DSA 结合的具体机制**：
 
@@ -3717,7 +3784,7 @@ def glm52_sparse_layer_forward(hidden_states, positions, layer_id):
 
 | 挑战 | 具体问题 | 现有支撑程度 |
 |---|---|---|
-| **Attention Backend 实现** | GLM-5.2 需要一个新的 triton/CUDA backend，实现 DSA 的两阶段 attention（索引扫描 + 稀疏计算）。SGLang 目前没有开源的 DSA backend——DeepSeek-V3.2 的 DSA backend 未公开 | 低。需从零实现或适配闭源 kernel |
+| **Attention Backend 实现** | DSA backend 已存在于 `layers/attention/dsa/`（`DeepseekSparseAttnBackend`，含 indexer/topk/triton kernel）。GLM-5.2 复用此 backend，仅需配置 `indexer_types` 的 shared 索引复用 | 高。backend 已就绪 |
 | **FP8 量化兼容** | DSA 索引 K 必须用 fp8 存储（`index_k_with_scale_buffer` 的 dtype=uint8），MLA latent 可选用 fp8/bf16。两套精度体系需在同一个 pool 中协调 | 中。DSATokenToKVPool 已支持，但需验证精度 |
 | **Pool 组装复杂度** | 78 层全部使用 DSA attention，仅需一个 `DSATokenToKVPool`，无需 dispatcher。`_init_pools` 标准 DSA 路径直接覆盖 | 低。零新代码 |
 | **RadixTree 兼容性** | Dense 层和 Sparse 层在同一棵树中共享前缀——树节点 value 存的是 Dense 层 slot，Sparse 层需要额外的 index slot 映射 | 高。`DSATokenToKVPool` 已实现 `move_kv_cache` 锁步搬迁 |
@@ -3750,7 +3817,7 @@ config.architectures=["GlmMoeDsaForCausalLM"]
 
 config.kv_lora_rank=512 (非空)
   │
-  └─→ self.use_mla_backend = True                       model_config.py:748
+  └─→ self.use_mla_backend = True                       model_runner.py:414
 
 两者同时为 True → model_runner_kv_cache_mixin.py:844:
   │
@@ -3772,7 +3839,7 @@ config.kv_lora_rank=512 (非空)
 - NVFP4 + flashinfer_trtllm long-context fix（#31001）
 - DSA fused top-k v2 for GLM-5.x（#30506）
 
-**一句话**：GLM-5.2 的 KV 物理池**零新增代码**——`DSATokenToKVPool` 直接复用，无自定义 dispatcher、无 SWA 池、无 MLA 池。主要工作在 attention backend 层（DSA 两阶段 kernel，~1000-2000 行 CUDA/Triton）和 `indexer_types` 的 shared 索引复用逻辑。
+**一句话**：GLM-5.2 的 KV 物理池**零新增代码**--`DSATokenToKVPool` 直接复用，无自定义 dispatcher、无 SWA 池、无 MLA 池。DSA attention backend 已存在于 `layers/attention/dsa/`（`DeepseekSparseAttnBackend`，含 indexer、topk、triton kernel），GLM-5.2 复用此 backend，仅需按 `indexer_types` 配置 shared 索引复用逻辑。
 
 ## 第9章 SGLang 端到端全推理链路时序闭环
 
@@ -4274,7 +4341,7 @@ SGLang 在 PagedAttention 的物理分页之上构建了 RadixTree 前缀共享�
 |---|---|---|---|
 | `architectures` | `["GlmMoeDsaForCausalLM"]` | `model_config.py:112` | `is_deepseek_dsa()` → `True` |
 | `index_topk` | `2048` | `model_config.py:114` | DSA 稀疏 Top-K 参数 |
-| `kv_lora_rank` | `512` | `model_config.py:748` | `use_mla_backend` → `True` |
+| `kv_lora_rank` | `512` | `model_runner.py:414` | `use_mla_backend` → `True` |
 | `qk_rope_head_dim` | `64` | `model_runner_kv_cache_mixin.py:860` | 传入 `DSATokenToKVPool` |
 | `index_head_dim` | `128` | `model_runner_kv_cache_mixin.py:867` | 传入 `DSATokenToKVPool` |
 | `num_hidden_layers` | `78` | `model_runner_kv_cache_mixin.py:861` | `layer_num=78`（无 PP 时） |
@@ -4303,13 +4370,13 @@ is_deepseek_dsa()=True && use_mla_backend=True
 - `"full"`：每层独立索引 K（21 层，前3层全full + 每4层一组的第1层）
 - `"shared"`：同组共享上一层的 full 索引 K（57 层，前3层全shared + 每4层一组的第2-4层）
 
-这意味着 `index_k_with_scale_buffer` 只需为 `"full"` 的 21 层创建 index buffer——`"shared"` 层复用同组 full 层的索引。这会反映在 `DSATokenToKVPool` 的 `layer_num` 参数中（仅 full 层分配 index buffer）。
+物理上 `DSATokenToKVPool` 仍按 `layer_num=78` 为所有 78 层分配 `index_k_with_scale_buffer`（`memory_pool.py:3090` 的 `for _ in range(layer_num)`），但只有 `"full"` 的 21 层会被实际写入索引数据。`"shared"` 层的 buffer 虽然分配了但不会被写入，attention kernel 直接读取同组 full 层的 index buffer。`indexer_types` 不改变 `layer_num` 参数。
 
 **KV 显存估算**（fp8，max_num_tokens=128K，仅 full index 层）：
 
-- latent KV：`128K × 576 × 78` ≈ **5.4 GB**（所有 78 层）
-- 索引 KV：`128K × (128+4) × 21` ≈ **0.35 GB**（仅 21 个 full 索引层）
-- 总计 ≈ **5.75 GB**
+- latent KV：`128K × 656 × 78` ≈ **6.25 GB**（所有 78 层，含 fp8 scale）
+- 索引 KV：`128K × 132 × 78` ≈ **1.26 GB**（78 层均分配 buffer，仅 21 层写入数据）
+- 总计 ≈ **7.51 GB**
 
 ### A.5 GLM-5.2 生产部署命令参考
 
