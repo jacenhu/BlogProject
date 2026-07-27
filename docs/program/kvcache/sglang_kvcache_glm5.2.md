@@ -587,6 +587,72 @@ def free_group_end(self):
 alloc_extend 就是一个 GPU Triton kernel 驱动的页分配器——知道每个请求已经占了多少页（前缀缓存），算出还需要多少页，用三段填充法把已有页剩余空位、
   完整新页、最后不完整页串联起来，返回一段物理上不连续但逻辑上无缝的光滑 slot 序列。
 
+
+**`alloc_extend` 源码解析**（`allocator/paged.py:168-220`）：
+
+```python
+def alloc_extend(self, prefix_lens, prefix_lens_cpu, seq_lens, seq_lens_cpu,
+                 last_loc, extend_num_tokens, num_new_pages=None):
+    # ① debug 断言: last_loc 与 prefix_lens 的 page 对齐一致 (L182-185)
+    if self.debug_mode:
+        assert torch.all((last_loc + 1) % page_size == prefix_lens % page_size)
+
+    # ② 延迟排序: 空闲页不够时先 merge_and_sort_free (L188-191)
+    if self.need_sort and extend_num_tokens // page_size + bs + 1 > len(free_pages):
+        self.merge_and_sort_free()
+
+    # ③ 预分配输出 tensor (L193-195)
+    out_indices = torch.empty((extend_num_tokens,), dtype=int64, device=device)
+
+    # ④ Triton kernel 三段填充 (L197-205)
+    alloc_extend_kernel[(bs,)](      # 每请求一个 block
+        prefix_lens,                  # 前缀长度（已有页内已用多少）
+        seq_lens,                     # 完整序列长度
+        last_loc,                     # 当前最后一页的最后一个 slot
+        self.free_pages,              # 空闲页编号池
+        out_indices,                  # 输出: 分配的 slot 索引
+        next_power_of_2(bs),          # power-of-2 特化
+        self.page_size,               # 64
+    )
+
+    # ⑤ debug 无重复检查 (L207-208)
+    if self.debug_mode:
+        assert len(torch.unique(out_indices)) == len(out_indices)
+
+    # ⑥ 计算新页数 + 容量检查 (L210-217)
+    if num_new_pages is None:
+        num_new_pages = get_num_new_pages(seq_lens_cpu, page_size, prefix_lens_cpu)
+    if num_new_pages > len(self.free_pages):
+        return None                   # OOM
+
+    # ⑦ 消费空闲页 (L219-220)
+    self.free_pages = self.free_pages[num_new_pages:]
+    return out_indices
+```
+
+kernel 三段填充逻辑（每请求独立计算）：
+
+```
+请求 i 的 extend token slot 分配:
+
+段1: 当前页剩余空位
+     last_loc+1 到 last_loc + (page_size - prefix_len % page_size)
+     ↑ 复用已有页的尾部空位，不消耗新页
+
+段2: 完整新页
+     从 free_pages 取 num_full_new_pages 个新页
+     每页 page_size 个 slot 全部使用
+     num_full_new_pages = (剩余需求) // page_size
+
+段3: 最后不完整页
+     从 free_pages 取 1 个新页，只用前 (剩余需求 % page_size) 个 slot
+
+-> out_indices = [段1 slots | 段2 slots | 段3 slots]
+  物理上跨多个页，逻辑上连续无缝
+```
+
+关键设计：**kernel 先写、free_pages 后切**。L197 kernel 从 `free_pages` 读取页编号写入 `out_indices`，L219 才真正消费 `free_pages`。中间 L210-217 的容量检查如果不够则返回 None，`out_indices` 被丢弃，`free_pages` 不变--"先计算后提交"避免分配失败时的回滚开销。
+
 ---
 
 `SWATokenToKVPoolAllocator`（`allocator/swa.py`）
@@ -2154,6 +2220,20 @@ def alloc_for_extend(batch):
 ```
 
 三步对应三层：①`ReqToTokenPool.alloc`（逻辑层行号）→ ②`allocator.alloc`（分配层 slot）→ ③`write_cache_indices`（写页表）。`alloc_token_slots`（L269）内部先 `evict_from_tree_cache` 把树缓存淘汰到腾出足够空闲，再 `allocator.alloc(num_tokens)`，`None` 则抛 `Out of memory`。
+
+
+**`alloc_token_slots` 中 allocator 的实际子类**（`common.py:274`）：
+
+`allocator = tree_cache.token_to_kv_pool_allocator` 的实际类型由 `_init_pools` 中 `page_size` 和模型类型决定：
+
+| 条件 | allocator 子类 | `alloc_token_slots` 是否被调用 |
+|---|---|---|
+| page_size=1, dcp=1（标准 MHA） | `TokenToKVPoolAllocator`（L1133） | ✅ 是，调 `allocator.alloc()` |
+| page_size>1 或 dcp>1（DSA/GLM-5.2） | `PagedTokenToKVPoolAllocator`（L1141） | ❌ 否，走 `alloc_paged_token_slots_extend` -> `allocator.alloc_extend()` |
+| Hybrid SWA | `SWATokenToKVPoolAllocator`（L1105） | ❌ 否，内部组合两个子 allocator |
+| HiSparse | `HiSparseTokenToKVPoolAllocator`（L1121） | ❌ 否 |
+
+**GLM-5.2（page_size=64）不走 `alloc_token_slots`**--`alloc_for_extend` 的 L481 `if _alloc_page_size(batch) == 1` 为 False，走 L489 的 `alloc_paged_token_slots_extend`，内部调 `PagedTokenToKVPoolAllocator.alloc_extend()`（三段填充法）。`alloc_token_slots` + `allocator.alloc()` 只在 page_size=1 的标准 MHA 模型上执行。
 
 `write_cache_indices`（`common.py:124`）支持两条路径：attention backend 支持 triton 时用 `write_req_to_token_pool_triton` kernel 一次性批量写入（把每个请求的 `prefix_tensors[i]` 指针表上送 GPU），否则循环 `req_to_token_pool.write` 逐请求写——前者写 `[req_idx, 0:prefix_len]` = prefix slot、`[req_idx, prefix_len:seq_len]` = 新分配的 extend slot。
 
