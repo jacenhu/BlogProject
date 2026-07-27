@@ -782,20 +782,106 @@ def get_value_buffer(self, layer_id: int):
 
 key 取完整的 `[nope | rope]`，value 只取前 `kv_lora_rank` 维的 nope 部分。
 
-**写入**（`set_mla_kv_buffer` L2752）：
+**写入**（`set_mla_kv_buffer` L2752）--三条路径：
 
 ```python
 def set_mla_kv_buffer(self, layer, loc, cache_k_nope, cache_k_rope):
     # cache_k_nope: (N, 1, kv_lora_rank)     # V_nope latent
     # cache_k_rope: (N, 1, qk_rope_head_dim) # K_rope (已施加 RoPE)
-    # FP8 DSA 路径 (dsa_kv_cache_store_fp8=True):
-    #   cache_k_nope_fp8: (N, 1, 528) [nope_fp8(512) | scales(16)]
-    #   cache_k_rope_fp8: (N, 1, 128) [rope_bf16_bytes(128)]
-    #   分别量化后拼接写入 kv_buffer
-    set_mla_kv_buffer_triton(kv_buffer[layer], loc, nope_fp8, rope_fp8)
+    # loc:          (N,)                      # N 个 token 的物理 slot 索引
+
+    # 路径1 (L2758): HIP FP8 -> set_mla_kv_buffer_triton_fp8_quant
+    # 路径2 (L2763): dsa_kv_cache_store_fp8 -> 分别量化 nope/rope 后写入
+    # 路径3 (L2790-2802): 默认路径，dtype 匹配后直接写入
+
+    # 路径3 默认路径（DSA+BF16 或纯 MLA）:
+    set_mla_kv_buffer_triton(kv_buffer[layer], loc, cache_k_nope, cache_k_rope)
 ```
 
+**默认路径（L2790-2802）写入示例**--以 DSA+BF16 场景，3 个 token 的 decode batch 为例：
+
+```python
+# 输入
+loc           = tensor([1024, 2048, 3072])        # 3 个 slot 索引
+cache_k_nope  = tensor([[[0.12, -0.34, ...]],     # (3, 1, 512) bf16, V_nope latent
+                        [[0.56, 0.78, ...]],
+                        [[-0.11, 0.23, ...]]])
+cache_k_rope  = tensor([[[0.45, -0.67, ...]],     # (3, 1, 64) bf16, K_rope（已施加 RoPE）
+                        [[0.89, 0.12, ...]],
+                        [[-0.33, 0.44, ...]]])
+
+# 目标物理池
+kv_buffer[layer_id]: shape (100064, 1, 576) dtype=bfloat16
+#                     [token数, head=1, kv_cache_dim=576]
+```
+
+Triton kernel 把 `cache_k_nope` 和 `cache_k_rope` **拼接**后 scatter 写入 `kv_buffer[loc]`：
+
+```
+kv_buffer[layer_id] 写入后:
+              ←── V_nope (512 维) ──-> ←K_rope(64)->
+  slot 1024:  [0.12, -0.34, ...]      [0.45, -0.67, ...]
+  slot 2048:  [0.56, 0.78, ...]       [0.89, 0.12, ...]
+  slot 3072:  [-0.11, 0.23, ...]      [-0.33, 0.44, ...]
+              ↑                        ↑
+              get_value_buffer()       get_key_buffer()
+              返回前 512 维             返回全部 576 维
+```
+
+物理上是一个连续的 576 维向量，逻辑上前 512 维是 V_nope，后 64 维是 K_rope。写入是**原位 scatter**--`kv_buffer[slot] = [nope | rope]`，无数据拷贝中间体。
+
+对比 **FP8 DSA 路径**（L2763-2778），同样的输入会先量化再写入，物理排布变为 656 维：`[fp8(512B) | scales(16B) | rope_bf16(128B)]`。默认路径不量化，直接拼接写入 576 维--这是最简单的路径。
+
 `set_kv_buffer`（L2723）用于非 MLA 路径（整块 latent 写入），`set_mla_kv_buffer` 是 MLA 专用（nope/rope 分开接收，支持 FP8 分量化路径）。
+
+**读取--`get_mla_kv_buffer`（L2804）与 FP8 DSA 专用反量化路径**：
+
+普通 MLA（非 FP8 DSA）用 `get_mla_kv_buffer`（L2804），其 Triton kernel（`mla_buffer.py:335`）按元素偏移直接读取 576 维 `[nope(512) | rope(64)]`，Triton 隐式做 dtype 转换，返回 `cache_k_nope(512) + cache_k_rope(64)`。
+
+**FP8 DSA 场景不走此路径**--656 维存储布局 `[fp8(512) | scales(16) | rope_bf16(128)]` 的偏移与 kernel 假设的 576 维不匹配（第 512-527 是 scale 而非 rope）。`set_kv_buffer` 有 `assert not self.dsa_kv_cache_store_fp8`（L2733）强制隔离。
+
+FP8 DSA 使用**专用反量化读取路径**（`forward_mha.py:570`）：
+
+```python
+def _get_mla_kv_buffer_from_fp8_for_dsa(self, forward_batch):
+    kv_cache_fp8 = get_token_to_kv_pool().get_key_buffer(self.attn_mha.layer_id)
+    kv_latent_bf16 = dequantize_k_cache_paged(kv_cache_fp8, kv_indices)
+    kv_a = kv_latent_bf16[:, :, :512]    # V_nope (512 维 bf16)
+    k_pe = kv_latent_bf16[:, :, 512:]    # K_rope (64 维 bf16)
+    return kv_a, k_pe
+```
+
+`dequantize_k_cache_paged`（`dsa/dequant_k_cache.py:168`，`assert dim_quant == 656`）分三段解析 656 维存储：
+
+```python
+input_nope_q = quant_k_cache[:, :512]                        # L207: fp8, 512 元素
+input_nope_s = quant_k_cache[:, 512:528].view(torch.float32) # L209: 4 个 fp32 scale
+input_rope   = quant_k_cache[:, 528:].view(torch.bfloat16)   # L213: 64 个 bf16 rope
+```
+
+Triton kernel `_dequantize_k_cache_paged_kernel` 做反量化：
+
+```
+存储 (656 维 uint8/fp8):                    反量化后 (576 维 bf16):
+┌─────────────────────────────────────────────────────────────┐
+│ fp8_nope(512B) │ scales(16B=4×fp32) │ rope_bf16(128B=64×bf16)│
+│  block_0: 128B  │ scale_0: 4B        │  rope_0: 2B           │
+│  block_1: 128B  │ scale_1: 4B        │  ...                  │
+│  block_2: 128B  │ scale_2: 4B        │  rope_63: 2B          │
+│  block_3: 128B  │ scale_3: 4B        │                       │
+└─────────────────────────────────────────────────────────────┘
+       │                 │                        │
+       ▼                 ▼                        │
+  nope_bf16[i] = fp8[i] × scale[i // 128]         │
+       │                                          ▼
+       ▼                              ┌─────────────────────┐
+┌──────────────────┐                  │  rope_bf16 (64 维)   │ ← 直接读取，无需反量化
+│  nope_bf16(512维) │                  │  (写入时保持 bf16)   │
+│  = kv_a (V_nope)  │                  │  = k_pe (K_rope)    │
+└──────────────────┘                  └─────────────────────┘
+```
+
+**rope 不需要反量化**--写入时 `rope_storage_dtype = bfloat16` 保持原始精度，读取时直接 `view(bf16)`。只有 nope 需要 `fp8 × scale -> bf16` 反量化。这就是为什么 FP8 存储虽然多了 16B scale 开销，但 rope 部分仍用 bf16（2 bytes/元素）而非 fp8（1 byte/元素）--RoPE 位置编码对精度敏感，不能量化。
 
 DSA 钩子：`use_dsa=True` 时不立即打印分配日志（`_finalize_allocation_log` 推迟到 DSA 子类，因为 DSA 还要再分配 indexer 缓冲，L2660）。
 
