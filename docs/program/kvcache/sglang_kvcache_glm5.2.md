@@ -173,6 +173,54 @@ class ReqToTokenPool:
 | `req_to_token` | `torch.Tensor` | GPU 上的二维页表，`[req_pool_idx, pos] → kv_slot` |
 | `free_slots` | `list[int]` | 空闲行号的列表，从 1 开始 |
 
+**`size` 的计算**（`_resolve_max_num_reqs`，`model_runner_kv_cache_mixin.py:1225`）：
+
+`size` 是最大并发**请求数**（不是 token 数），由 `--max-running-requests` 或自动估算决定：
+
+```python
+def _resolve_max_num_reqs(self, token_capacity: int) -> int:
+    # 估算值：根据 KV token 容量和上下文长度推算
+    estimated = int(token_capacity / context_len * 512)       # L1229
+    estimated = max(min(estimated, 4096), 2048)                # L1230 钳制到 [2048, 4096]
+
+    if server_args.max_running_requests is not None:
+        # 情况①: 用户指定了 --max-running-requests
+        requested_per_worker = max_running_requests // dp_size           # L1234 DP 均分
+        max_num_reqs = min(requested_per_worker, token_capacity // 2)    # L1235 不超过容量一半
+    else:
+        # 情况②: 用户未指定，自动估算
+        max_num_reqs = min(estimated, token_capacity // 2)               # L1238
+```
+
+GLM-5.2 部署举例（`--max-running-requests 256 --dp 8`）：
+
+```
+requested_per_worker = 256 // 8 = 32              # 每个 DP worker 32 个并发请求
+token_capacity = ~1,010,000 tokens                 # DSATokenToKVPool 的 size
+max_num_reqs = min(32, 1010000 // 2) = 32
+
+ReqToTokenPool.size = 32
+_alloc_size = 32 + 1 = 33                          # +1 是 slot 0 padding
+req_to_token shape = (33, max_context_len)         # 33 行 × 1M 列 × 4B ≈ 132 MB
+```
+
+关键约束：
+
+| 约束 | 作用 |
+|---|---|
+| `// dp_size` | 每个 DP worker 独立池，用户值按 DP 数均分 |
+| `token_capacity // 2` | 上限--防止请求元数据（页表）占满 KV 池 |
+| `clamp(estimated, 2048, 4096)` | 自动估算的合理范围 |
+
+与 `DSATokenToKVPool.size` 的区别：
+
+| | `ReqToTokenPool.size` | `DSATokenToKVPool.size` |
+|---|---|---|
+| 含义 | 最大并发**请求数** | 最大并发 **token 数** |
+| 来源 | `--max-running-requests` 或估算 | `可用显存 ÷ 每 token 字节` |
+| GLM-5.2 值 | 32（每 DP worker） | ~1,010,000 |
+| 影响的显存 | 页表 `size × max_context_len × 4B` | KV 池 `size × kv_cache_dim × layer_num` |
+
 **页表解读**：`req_to_token[3][127] = 2048` 表示"第 3 号请求槽位中，该请求的第 127 个 token，存储在 KV cache 的第 2048 号物理 slot"。
 
 ---
