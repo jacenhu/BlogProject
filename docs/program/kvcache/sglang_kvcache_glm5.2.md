@@ -3632,7 +3632,24 @@ topk 是连接两者的桥梁：用 index_k 算出的 score 选位置，再用�
 
 **bs 与 topk 的关系**：`bs = forward_batch.batch_size`（当前运行请求数，受 `--max-running-requests` 控制，典型几十到几百），topk 的 2048 是**每请求**选的 KV 位置数，两者独立。logits 形状 `[bs, num_kv_positions]`，topk 对每行（每请求）独立选 2048 个位置。
 
-**`num_kv_positions` 的范围**：= 每请求当前 KV token 数 `seq_len`，构成 `seq_len = prefix_len(RadixCache 命中复用) + 本请求新生成 token`，decode 每步 +1。范围 `[prefix_len, max_context_len]`，上限 `max_context_len = model_config.context_len + extra_max_context_len`（model_runner_kv_cache_mixin.py:438，由 `--context-length` 或模型 `max_position_embeddings` 决定，GLM-5.2 长上下文可达 128K/256K+）。代码：`cache_seqlens_int32 = seq_lens + draft_token_num`（dsa_backend.py:736），indexer 用 `seqlens_32 = get_seqlens_int32()`（dsa_indexer.py:843）。batch 内 ragged、padding 到 `max_seq_len = block_tables.shape[1] * page_size`（dsa_indexer.py:831），topk 用 `lengths=seqlens` 对每请求 `[0, seq_len)` 实际范围选 Top-2048（dsa_topk_backend.py:37）。**这正是 DSA 存在的意义**：`num_kv_positions` 可达十几万，全量 `O(seq_len)` attention 不可行，DSA 先廉价打分再只精读 Top-2048，把复杂度降到 `O(2048)`。
+**`num_kv_positions` 的范围**：= 每请求当前 KV token 数 `seq_len`，构成 `seq_len = prefix_len(RadixCache 命中复用) + 本请求新生成 token`，decode 每步 +1。范围 `[prefix_len, max_context_len]`，上限 `max_context_len = model_config.context_len + extra_max_context_len`（model_runner_kv_cache_mixin.py:438，由 `--context-length` 或模型 `max_position_embeddings` 决定，**GLM-5.2 `max_position_embeddings=1048576` 即 1M 上下文**，见 L2773；req_to_token 页表第二维即 1M，`[33, 1048576]` ≈ 132MB，见 L204）。代码：`cache_seqlens_int32 = seq_lens + draft_token_num`（dsa_backend.py:736），indexer 用 `seqlens_32 = get_seqlens_int32()`（dsa_indexer.py:843）。batch 内 ragged、padding 到 `max_seq_len = block_tables.shape[1] * page_size`（dsa_indexer.py:831），topk 用 `lengths=seqlens` 对每请求 `[0, seq_len)` 实际范围选 Top-2048（dsa_topk_backend.py:37）。**这正是 DSA 存在的意义**：`num_kv_positions` 可达十几万，全量 `O(seq_len)` attention 不可行，DSA 先廉价打分再只精读 Top-2048，把复杂度降到 `O(2048)`。
+
+**边界：`seq_len < 2048` 时 DSA 退化为 dense（全选）**。`_topk_unfused`（dsa_topk_backend.py:197）处理短序列：
+
+```python
+topk_indices = score.new_full((batch_size, topk), -1)            # L206 初始化全 -1
+masked_logits = score.masked_fill(~valid_mask, float("-inf"))    # L224 超出 [0,seq_len) 填 -inf
+valid_topk = min(topk, max_score_len)                            # L225 实际选 min(2048, 列数)
+topk_local_indices = topk_local_indices.masked_fill(
+    topk_scores == float("-inf"), -1)                            # L229-231 选中的 -inf 填 -1
+topk_indices[:, :valid_topk] = topk_local_indices                # L232 只填前 valid_topk 个，其余保持 -1
+```
+
+- `seq_len < 2048`：选出全部 `seq_len` 个位置 + `2048 - seq_len` 个 `-1` → **全选 = dense，无稀疏收益**，反而多付 indexer 打分开销
+- `seq_len >= 2048`：选 Top-2048 → 稀疏生效
+- `-1` 经 `transform_index.py:61-64`（`mask = topk_indices >= 0`）传递到 `page_table_1`，`flash_mla_sparse_fwd` 跳过 `-1` 不读
+
+**判断是 per-request `seq_len`（`lengths=seqlens`），不是 batch 的 `max_seq_len`**：`max_seq_len < 2048` → 整个 batch 全选；`max_seq_len >= 2048` 但个别请求 `seq_len < 2048` → 那些请求全选、长请求稀疏（混合）。**2048（`index_topk`）是稀疏生效的阈值，DSA 为长上下文设计，短请求享受不到稀疏红利。**
 
 ## 第6章 KV Cache 淘汰与内存回收机制
 
@@ -4664,6 +4681,35 @@ HiCache 多级卸载（可选）:
 GLM-5.2 的 KV 总量由两个维度联合控制：DSA 稀疏（attention 计算只涉及 2048 token）+ MLA 压缩（每 token 576 元素 vs 全量 24576）。两者叠加使 1M 上下文的 KV 总量可控。实际适配只需 `DSATokenToKVPool`（KV 物理池已在 `_init_pools` 中自动路由），无需 SWA 或自定义 dispatcher。
 
 # 第五部分：HiCache 多级缓存工程优化
+### 9.10 GLM-5.2 端到端请求流程（精确行号）
+
+9.1-9.5 给出概括流程，本节补充 GLM-5.2 各阶段精确行号 + 短输入下 DSA 退化 dense 的关键洞察。
+
+**精确行号表**（7 阶段）：
+
+| 阶段 | 入口 | 行号 |
+|------|------|------|
+| 1 接收+tokenize | `generate_request` | tokenizer_manager.py:589 |
+| 1 | `_tokenize_one_request` / `_send_one_request` / `_wait_one_response` | :793 / :1331 / :1446 |
+| 2 调度 | `event_loop_normal` | scheduler.py:1542 |
+| 2 | `get_next_batch_to_run` / `run_batch` / `process_batch_result` | :2607 / :3200 / :3461 |
+| 3 前缀匹配 | `RadixCache.match_prefix` / `insert` | radix_cache.py:355 / :415 |
+| 4 KV 分配 | `alloc_for_extend` / `alloc_for_decode` | common.py:452 / :581 |
+| 4 | `ReqToTokenPool.alloc` | memory_pool.py:276 |
+| 5 forward | `ModelRunner.forward` -> `_forward_raw` -> `EagerRunner.execute` -> `model.forward` | model_runner.py:3001/3143, eager_runner.py:200/251/342 |
+| 5 | 模型类 `GlmMoeDsaForCausalLM`（继承 DeepseekV2 复用 MLA） | glm4_moe.py:1480 |
+| 5 DSA indexer | `fused_k_indexer_norm_rope_store` 写压缩K / paged MQA 算 logits | dsa_indexer.py:678 / :905-960 |
+| 5 DSA topk | `topk_transform` | dsa_topk_backend.py:75 |
+| 5 DSA attn | `init_forward_metadata` / `forward_decode` / `set_mla_kv_buffer` / `_forward_flashmla_sparse` | dsa_backend.py:726 / :2051 / :2097 / :2145 |
+| 6 采样 | `ModelRunner.sample` -> `Sampler.forward` | model_runner.py:3259, sampler.py:94 |
+| 7 完成 | `process_batch_result_prefill`/`_decode` | batch_result_processor.py:178/629 |
+| 7 | `release_kv_cache` -> `RadixCache.insert` | common.py:635, radix_cache.py:415 |
+| 7 | `stream_output` -> Detokenizer -> `handle_loop` | output_streamer.py:93, detokenizer_manager.py:161, tokenizer_manager.py:1847 |
+
+**关键事实**：运行时框架（tokenizer/scheduler/sample/detokenize）对 GLM-5.2 与其他模型**完全一致**，DSA+MLA 只在阶段 5 的 `model.forward` 内执行（`GlmMoeDsaForCausalLM`，glm4_moe.py:1480），框架本身不感知注意力类型。
+
+**短输入下 DSA 退化 dense**：对"今天是周几"这类短输入，`seq_len ≈ 5-8 < index_topk(2048)`，prefill 和 decode 全程 topk 全选（`-1` 填充，见 5.7.2），DSA 退化为 dense MLA，稀疏机制完全不生效，反而多付 indexer 压缩K打分开销。只有 `seq_len >= 2048`（长上下文）才发挥 DSA 价值。**GLM-5.2 的 DSA 为长上下文设计，短问答享受不到稀疏红利**。
+
 ## 第10章 SGLang HiCache 多级缓存架构原理
 
 HiCache 给 RadixCache 增加了 GPU(L1)→CPU(L2)→Storage(L3) 的升降级能力。核心在 `python/sglang/srt/mem_cache/hiradix_cache.py`、`hicache_storage.py`、`pool_host/`、`storage/`。
