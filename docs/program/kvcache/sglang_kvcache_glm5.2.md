@@ -2885,7 +2885,7 @@ forward_batch.req_pool_indices → FlashInferIndicesUpdaterDecode.update()
           每 thread block 从 kv_indices 读 slot → 从 K/V buffer 读对应行 → 算 attention
 ```
 
-Pre-前言：forward metadata 在 `init_forward_metadata`（`flashinfer_backend.py:739`）阶段构建——`seq_lens`、`kv_indptr`（前缀和指针数组表示每个请求 paged KV 段的起始偏移）、`kv_last_page_len`（最后一个 page 的实际长度）、`kv_indices_buf`（CUDA graph 专用固定大小 buffer）。这些 metadata 在后续 IndicesUpdater 与 flashinfer wrapper 之间流转。
+Pre-前言：forward metadata 在 `init_forward_metadata`（`flashinfer_backend.py:769`）阶段构建——`seq_lens`、`kv_indptr`（前缀和指针数组表示每个请求 paged KV 段的起始偏移）、`kv_last_page_len`（最后一个 page 的实际长度）、`kv_indices_buf`（CUDA graph 专用固定大小 buffer）。这些 metadata 在后续 IndicesUpdater 与 flashinfer wrapper 之间流转。
 
 ### 5.2 `IndicesUpdater`：`req_to_token` → flashinfer `paged_kv_indices` 的 Triton 转换 kernel
 
@@ -2930,6 +2930,47 @@ def create_flashinfer_kv_indices_triton(
 核心算法：**per-request one CTA，从 `req_to_token` 行按 seq_len 做 gather → scatter 到 `kv_indices` 紧凑数组**。`kv_indptr` 是前缀和定位数组——请求 i 的 KV 序列从 `kv_indices[kv_indptr[i]]` 开始连续存放。这是从"per-request 行式页表"到"per-kernel 紧凑 flat 索引"的形态转换，flashinfer decode kernel 只接受紧凑 flat 格式。
 
 MLA 版本 `create_flashmla_kv_indices_triton`（kv_indices.py:99）输出 `/ PAGED_SIZE`（L150）——MLA 内部存 slot 也是按 token 粒度，但 flashMLA kernel 要求 page 编号而非 slot 编号，此处做除法转换。`get_num_page_per_block_flashmla` / `get_num_kv_index_blocks_flashmla`（L84/89）算 page block 布局。
+
+### 5.2.1 [GLM-5.2/DSA] 无 `IndicesUpdater`：`init_forward_metadata` 内联构建 2D `page_table`
+
+5.2 讲的 `FlashInferIndicesUpdaterDecode.update()` 是标准 FlashInfer 的 decode 索引网关。**GLM-5.2 走 DSA backend，没有这个类/函数**--对应职责内联在 `DeepseekSparseAttnBackend.init_forward_metadata`（`dsa_backend.py:726`）里，且索引形态完全不同。
+
+| | 标准 FlashInfer | GLM-5.2 DSA |
+|--|--|--|
+| 入口 | `FlashInferIndicesUpdaterDecode.update()` | `init_forward_metadata`（dsa_backend.py:726） |
+| 索引形态 | flat 1D `kv_indices`（gather） | 2D `page_table`（直接切片） |
+| 转换 kernel | `create_flashinfer_kv_indices_triton` | 无，直接切 `req_to_token` |
+| kernel 接受 | flat slot 索引 | 2D 页号 `real_page_table` |
+
+**DSA 的索引构建**--不做 gather，直接从页表切片保留 2D 形态：
+
+```python
+# dsa_backend.py:748  直接从页表切片，保留 2D 形态（不做 gather）
+page_table = self.req_to_token_pool.req_to_token[
+    forward_batch.req_pool_indices, :max_seqlen_k
+]
+# dsa_backend.py:1008  slot 级 -> 页号级，供 FlashMLA/indexer 用
+real_page_table=self._transform_table_1_to_real(page_table)
+```
+
+`_transform_table_1_to_real`（dsa_backend.py:697）把 slot 级页表转成页号级：
+
+```python
+strided_indices = arange(0, max_seqlen_k, page_size, ...)  # 每 page_size 取一个代表 slot
+return page_table[:, strided_indices] // page_size          # slot_id // page_size = page_id
+```
+
+**decode 分支**（dsa_backend.py:779）：
+
+```python
+if forward_batch.forward_mode.is_decode_or_idle():
+    extend_seq_lens_cpu = [1] * batch_size
+    max_seqlen_q = 1
+    cu_seqlens_q = self.get_device_int32_arange(batch_size + 1)
+    seqlens_expanded = cache_seqlens_int32
+```
+
+**为什么 DSA 不用 flat `kv_indices`**：FlashMLA kernel 接受 2D `page_table`（页号），不需要 flat slot 数组；且 DSA 还要为 indexer/topk 额外构建 `real_page_table`、`dsa_cache_seqlens_int32`（clip 到 topk）、`page_table_1_flattened` 等字段（`DSAMetadata`，dsa_backend.py:163），逻辑比 FlashInfer 复杂，所以没有复用 `IndicesUpdater` 抽象，直接在 `init_forward_metadata` 内联完成。metadata 关键字段：`page_table_1`（slot 级原始页表）、`real_page_table`（页号级，L1008）、`cu_seqlens_k`（L737）、`dsa_cache_seqlens_int32`（clip 到 topk）。
 
 ### 5.3 零拷贝读取、in-place 视图复用、预取优化
 
@@ -3016,6 +3057,56 @@ Layer N+1 forward:
 alt_stream 写入与下一层 attention 的默认流读取在 GPU 硬件上串行化（同 buffer 有 RAW dependency），但写入与**同一层**的 output projection/next layer QKV projection 可以重叠——那些计算不访问 k_buffer。
 
 **一句话总结**：全链路只拷贝每 token 4 字节的 int32 索引——K/V 数据通过 `data_ptrs` 指针直传、`view(dtype)` 类型转换、`_paged_kv_indices_buf` 固定 buffer 复用三层零拷贝机制保证"索引搬运、数据不动"。
+
+### 5.3.1 MLA/GLM-5.2 读取路径差异：`get_key_buffer` 返回整个 latent
+
+5.3 的零拷贝链以 MHA（`k_buffer`/`v_buffer` 双 buffer）为例。MLA 只有单个 `kv_buffer`，读取语义不同——这是 GLM-5.2 读取的核心差异。
+
+**MHA 读取**（双 buffer，flashinfer paged kernel 直接消费）：
+
+```python
+# flashinfer_backend.py:1140
+self.token_to_kv_pool.get_kv_buffer(layer.layer_id)   # -> (k_buf, v_buf) 两个独立 buffer
+```
+
+**MLA 读取**（单 latent buffer，返回整个 `[V_nope(512) | K_rope(64)]`）：
+
+```python
+# memory_pool.py:2701  MLATokenToKVPool.get_key_buffer
+def get_key_buffer(self, layer_id: int):
+    if self.layer_transfer_counter is not None:
+        self.layer_transfer_counter.wait_until(layer_id - self.start_layer)  # PP/disagg 同步
+    if self.store_dtype != self.dtype:
+        return self.kv_buffer[layer_id - self.start_layer].view(self.dtype)  # uint8 -> bf16/fp8 零拷贝
+    return self.kv_buffer[layer_id - self.start_layer]   # 整个 latent，不拆 nope/rope
+```
+
+**`get_value_buffer` 对 MLA 的特殊语义**（memory_pool.py:2710）——只返回 nope 部分：
+
+```python
+def get_value_buffer(self, layer_id: int):
+    ...
+    return self.kv_buffer[layer_id - self.start_layer][..., : self.kv_lora_rank]  # 切片 [:512]，丢 K_rope
+```
+
+MLA 的 V 被压进 latent 的前 `kv_lora_rank` 维，所以 `get_value_buffer` 切片 `[..., :512]` 只返回 V_nope，丢弃 K_rope。`get_kv_buffer`（L2720）= `(get_key_buffer 整个 latent, get_value_buffer nope 切片)`。
+
+**cutlass MLA decode 的 reshape**（cutlass_mla_backend.py:238）——kernel 用页号索引，把 latent 按 page 重排：
+
+```python
+k_cache = self.token_to_kv_pool.get_key_buffer(layer.layer_id)        # [num_slots, kv_cache_dim]
+o = cutlass_mla_decode(
+    kv_c_and_k_pe_cache=k_cache.view(-1, PAGE_SIZE, self.kv_cache_dim),  # [num_pages, PAGE_SIZE, dim]
+    page_table=self.forward_metadata.block_kv_indices,                  # 页号表
+    ...
+)
+```
+
+**`get_mla_kv_buffer`**（memory_pool.py:2804）：拆成 `cache_k_nope`/`cache_k_rope` 两个 tensor 返回（调 `get_mla_kv_buffer_triton` 读）。**非 attention 主路径**——grep 确认 `layers/attention/` 下各 backend 均未调用，用于权重迁移/调试等需要分开 nope/rope 的场景。主路径都用 `get_key_buffer` 拿整个 latent。
+
+**`layer_transfer_counter.wait_until`**（L2702）：PP/disagg 场景下，读某层 KV 前先阻塞等该层 KV 跨 rank/跨节点传输完成，实现 KV 传输与 attention 计算的流水线 overlap。MHA 的 `get_key_buffer` 也有同名同步点（memory_pool.py:1651 区域）。
+
+**一句话总结**：MHA 读双 buffer `(k_buf, v_buf)`；MLA 读单 latent buffer，`get_key_buffer` 返回整个 `[V_nope|K_rope]`、`get_value_buffer` 切片只取 nope，cutlass kernel 按 page 重排后用 `page_table` 索引。
 
 ### 5.4 多卡跨分片 KV 聚合读取：TP AllGather / EP 路由分发
 
@@ -3291,6 +3382,257 @@ Phase 2: Sparse Attention (精准读 latent KV)
 物理池和页表层完全不用变——`DSATokenToKVPool` 的 `get_index_k_scale_buffer` API 已封装好打包页的融合读取。综合适配方案（DSA backend 实现 + Pool 组装）详见 8.8 节。
 
 
+
+### 5.7 [GLM-5.2/DSA] 两阶段稀疏读取：indexer 打分 -> topk 选页 -> 只读 Top-K page
+
+5.1-5.3 讲的是标准 attention 读取（全量读 K/V）。GLM-5.2 的 DSA 是**两阶段稀疏读取**：先读便宜的"压缩 K"给所有 page 打分选页，再只读被选中的 Top-K page 的完整 latent 算 attention。对应**两套物理 buffer**：
+
+| buffer | 内容 | 谁读 | 用途 |
+|--------|------|------|------|
+| `index_k_with_scale_buffer` | 压缩 K（FP8 K + scale，每页 8448B） | indexer | 打分选页 |
+| `kv_buffer` | 完整 latent `[V_nope(512)\|K_rope(64)]` | attention | 算 attention（只读 Top-K page） |
+
+**阶段 0：metadata 构建**（`init_forward_metadata`，dsa_backend.py:726）
+
+```python
+page_table = req_to_token[req_pool_indices, :max_seqlen_k]   # L748 直接切 2D
+real_page_table = _transform_table_1_to_real(page_table)     # L1008 slot//page_size
+cu_seqlens_k, dsa_cache_seqlens_int32(clip to topk) ...
+```
+
+**阶段 1：Indexer 读压缩 K 算 page score**（dsa_indexer.py）
+
+```python
+# dsa_indexer.py:827-832  读压缩 K 做 MQA 打分
+block_tables = metadata.get_page_table_1()        # 或 get_page_table_64()，页号表
+kv_cache_fp8 = get_token_to_kv_pool().get_index_k_with_scale_buffer(layer_id=layer_id)
+# Q × 压缩 K -> 每个 page 的 score
+```
+
+indexer 层（21 full + 57 shared）用 Q 和压缩 K 做 MQA，算出各 page 的 relevance score。压缩 K 比完整 latent 小得多（每页 8448B vs 完整 latent），这一步很便宜。写入侧用 `fused_k_indexer_norm_rope_store(..., get_index_k_with_scale_buffer(layer_id))`（dsa_indexer.py:678-680）。
+
+**阶段 2：Top-K 选 page**（dsa_topk_backend）
+
+```
+topk_indices = topk(score, k=index_topk=2048)   # 选最相关的 2048 个 page
+```
+
+**阶段 3：Sparse attention 只读 Top-K page 的完整 latent**（`forward_decode`，dsa_backend.py:2051）
+
+```python
+# [1] 写当前 token 的 KV（完整 latent）
+self.token_to_kv_pool.set_mla_kv_buffer(layer, cache_loc, k, k_rope)   # L2097
+# [2] 读整个 latent buffer（零拷贝 view）
+kv_cache = self.token_to_kv_pool.get_key_buffer(layer.layer_id)        # L2105
+# [3] 按 topk_indices 构建稀疏 page_table_1（只含 Top-K page）
+if self.hisparse_coordinator is not None:
+    page_table_1 = self.hisparse_coordinator.swap_in_selected_pages(...)   # L2127 HiCache 换入
+elif self.use_fused_topk:
+    page_table_1 = self._get_fused_topk_page_table(topk_indices)          # L2134
+else:
+    page_table_1 = transform_index_page_table_decode(                      # L2136
+        page_table=metadata.page_table_1, topk_indices=topk_indices, page_size=1)
+# [4] 稀疏 attention：只对 page_table_1 的 page 算 attention
+return self._forward_flashmla_sparse(q_all, kv_cache, page_table_1, ...)   # L2145
+       # 或 _forward_flashmla_kv / _forward_fa3 / _forward_tilelang / _forward_aiter
+```
+
+**核心洞察**：
+
+| | 标准 attention | GLM-5.2 DSA |
+|--|--|--|
+| 读取量 | 全部 N 个 token 的 K/V | 压缩 K（全量，便宜）+ Top-K page 完整 latent |
+| 复杂度 | O(N) | O(N) 打分 + O(topk=2048) 精读 |
+| 读几次 | 1 次（完整 K/V） | 2 次（压缩 K + 选中 page 完整 latent） |
+
+这就是 GLM-5.2 处理长上下文省算力的本质：不全量精读，先用压缩表示廉价选页，再只对 Top-K page 精读完整 latent。`index_k_with_scale_buffer` 的存在就是为了这个"廉价打分"通道。
+
+**调用时序图**（带行号）：
+
+```mermaid
+sequenceDiagram
+    participant MR as ModelRunner
+    participant BE as DeepseekSparseAttnBackend
+    participant Pool as DSATokenToKVPool
+    participant IX as DSAIndexer
+    participant TK as DSATopKBackend
+    participant K as SparseKernel
+
+    Note over MR,BE: 阶段0: metadata 构建 (每 batch 1次)
+    MR->>BE: init_forward_metadata(fb)
+    Note right of BE: dsa_backend.py:726
+    BE->>Pool: req_to_token[fb.req_pool_indices, :max_seqlen_k]
+    Note right of BE: L748 (req_pool_indices 来自 alloc, memory_pool.py:276)
+    BE->>BE: _transform_table_1_to_real(page_table)
+    Note right of BE: L697 slot//page_size, 调用点 L1008
+    BE->>BE: compute_cu_seqlens(cache_seqlens) L737
+    BE-->>MR: metadata{page_table_1, real_page_table, cu_seqlens_k, dsa_cache_seqlens_int32}
+
+    Note over MR,IX: 阶段1: indexer 层 (21 full + 57 shared) 每层
+    MR->>IX: forward(q, layer)
+    IX->>Pool: get_index_k_with_scale_buffer(layer_id)
+    Note right of IX: dsa_indexer.py:680 写压缩K<br/>fused_k_indexer_norm_rope_store L678
+    IX->>Pool: get_index_k_with_scale_buffer(layer_id)
+    Note right of IX: dsa_indexer.py:832 读压缩K算分<br/>block_tables=get_page_table_1() L827
+    IX->>IX: Q × 压缩K (MQA) -> page scores
+    IX-->>MR: scores
+
+    Note over MR,TK: 阶段2: topk 选页
+    MR->>TK: topk(scores, k=2048)
+    TK-->>MR: topk_indices
+
+    Note over MR,K: 阶段3: attention 层 forward_decode (dsa_backend.py:2051)
+    MR->>BE: forward_decode(q,k,v,layer,topk_indices)
+    BE->>Pool: set_mla_kv_buffer(layer, cache_loc, k, k_rope)
+    Note right of BE: L2097 写完整 latent
+    BE->>Pool: get_key_buffer(layer.layer_id)
+    Note right of BE: L2105 读完整 latent
+    BE->>BE: 构建 page_table_1 (L2126-2140)
+    Note right of BE: swap_in_selected_pages L2127 /<br/>_get_fused_topk_page_table L2134 /<br/>transform_index_page_table_decode L2136
+    BE->>K: _forward_flashmla_sparse(q_all, kv_cache, page_table_1)
+    Note right of BE: L2145 只读 Top-K page
+    K-->>BE: o (attention output)
+    BE-->>MR: o
+```
+
+**关键行号速查**：
+
+| 阶段 | 调用 | 行号 |
+|------|------|------|
+| 0 metadata | `init_forward_metadata` | dsa_backend.py:726 |
+| 0 | `req_to_token[req_pool_indices, :max_seqlen_k]` | L748 |
+| 0 | `_transform_table_1_to_real`（slot//page_size） | L697, 调用 L1008 |
+| 1 indexer 写压缩K | `fused_k_indexer_norm_rope_store` + `get_index_k_with_scale_buffer` | dsa_indexer.py:678, 680 |
+| 1 indexer 读压缩K算分 | `get_index_k_with_scale_buffer` + `get_page_table_1()` | dsa_indexer.py:827, 832 |
+| 2 topk | `topk(scores, 2048)` | dsa_topk_backend |
+| 3 attention 写KV | `set_mla_kv_buffer` | dsa_backend.py:2097 |
+| 3 attention 读latent | `get_key_buffer` | L2105 |
+| 3 构建稀疏页表 | `swap_in_selected_pages` / `_get_fused_topk_page_table` / `transform_index_page_table_decode` | L2127 / L2134 / L2136 |
+| 3 稀疏attention | `_forward_flashmla_sparse` | L2145 |
+
+### 5.7.1 indexer 算分与 topk 展开细节
+
+**indexer 读压缩K算分**（`_get_topk_paged`，dsa_indexer.py:801）--用 Q 和压缩 K 做 paged MQA，输出每个 page 的 relevance score：
+
+```python
+# 1. 读压缩 K + reshape (L832, L899-901)
+kv_cache_fp8 = get_token_to_kv_pool().get_index_k_with_scale_buffer(layer_id=layer_id)  # L832
+kv_cache_fp8 = kv_cache_fp8.view(
+    kv_cache_fp8.shape[0], block_kv, num_heads_kv, head_dim_with_sf)   # L899
+# block_kv = page_size = 64 (L824 断言 CUDA page_size==64)
+# num_heads_kv = 1            (L897, MQA: 所有 Q head 共享 1 个 KV head)
+# head_dim_with_sf = 132      (L898 = 128 压缩K + 4 fp32 scale)
+#   → 一页 = 64 slot × 132 = 8448 bytes（呼应 index_k_with_scale_buffer 布局）
+#   → num_heads_kv=1 是 MQA，算量是标准 MHA 的 1/N，这就是"廉价打分"的来源
+
+# 2. 页表 (L826-829)
+block_tables = metadata.get_page_table_64()   # [bs, num_pages] 页号表
+max_seq_len = block_tables.shape[1] * page_size   # L831
+
+# 3. Paged MQA 算 logits (L905-960) -- 四个后端，都是 Q × 压缩K 的 paged MQA
+if is_aiter():       logits = aiter_paged_mqa_logits(...)        # L906
+elif use_cute_dsl:   logits = cutedsl_paged_mqa_logits(...)      # L917
+elif use_dg_native:  logits = deepgemm_paged_mqa_logits_native(...)  # L936
+else:                logits = deepgemm_paged_mqa_logits_split(...)   # L950
+# 输出 logits：每个 page 一个 relevance score
+
+# 4. 调 topk (L963)
+topk_result = metadata.topk_transform(logits, self.index_topk)   # index_topk=2048
+```
+
+**topk**（`topk_transform`，dsa_topk_backend.py:75）--两层：
+
+```python
+# 1. topk_func (L37) -- 纯 topk 选择，3 后端
+if self.is_sgl_kernel():  return fast_topk_v2(score, lengths, topk, ...)        # L47  融合快速版
+if self.is_torch():       return _topk_unfused(..., topk_op=torch.topk, ...)    # L49  逐行 torch.topk
+if self.is_flashinfer():  return _topk_unfused(..., topk_op=flashinfer.top_k)   # L60
+
+# 2. topk_transform (L75) -- 融合 topk + 页表变换
+# 融合 v2 路径 (L101-111)：topk 选择 + page-table 变换融合在一次 launch
+if (envs.SGLANG_OPT_USE_TOPK_V2.get()
+    and topk_transform_method == PAGED
+    and 0 < topk <= 2048
+    and lengths.shape[0] == logits.shape[0] == attn_metadata.real_page_table.shape[0]):
+    return _topk_transform_v2_paged(logits, lengths, topk, attn_metadata)   # L111
+    # DeepSeek-V4 v2 JIT kernel，直接消费 page_size>=1 表，不生成 page_size=1 中间表
+    # 注释 L94: "Shared by DeepSeek-V3.2 and GLM DSA" ← GLM 主路径
+# 非融合路径 (L118+)：先 topk 选 indices，再用 page_table_1 变换成页号
+return fast_topk_transform_fused(score=logits, ...)   # L130
+# 输出 topk_indices[bs, 2048] -- 每个请求选出的 Top-2048 个 page 索引
+```
+
+**topk_indices -> page_table_1**（dsa_backend.py:2136）--gather Top-K page 的 slot 序列供 sparse kernel：
+
+```python
+page_table_1 = transform_index_page_table_decode(
+    page_table=metadata.page_table_1,    # 全量 slot 级页表
+    topk_indices=topk_indices,           # Top-K page 选择
+    page_size=1,
+)
+# → 供 _forward_flashmla_sparse (L2145) 只读 Top-K page
+```
+
+**展开链路**：
+
+```
+indexer 层:
+  get_index_k_with_scale_buffer(layer_id)             dsa_indexer.py:832
+    └─ view [num_pages, 64, 1, 132]                    L899  (64 slot/页, MQA, 128K+4scale)
+  block_tables = get_page_table_64()                   L829
+  logits = <paged_mqa>(q_fp8, kv_cache_fp8, weights, block_tables, ...)  L905-960
+    └─ Q × 压缩K, 每 page 产出 1 个 score (MQA, 廉价)
+  topk_result = topk_transform(logits, 2048)           L963
+topk:
+  topk_func: fast_topk_v2 / torch.topk / flashinfer.top_k   dsa_topk_backend.py:37
+  topk_transform:
+    ├─ 融合 v2: _topk_transform_v2_paged (topk+页表变换 1 launch)  L111  ← GLM DSA 主路径
+    └─ 非融合: fast_topk_transform_fused (先选再变换)              L130
+attention 层:
+  page_table_1 = transform_index_page_table_decode(page_table_1, topk_indices)  dsa_backend.py:2136
+    └─ gather Top-K page 的 slot 序列 -> _forward_flashmla_sparse    L2145
+```
+
+### 5.7.2 DSA 数据流澄清：index_k 只打分，latent 才算 attention
+
+**常见误解**：topk 是在 `index_k_with_scale_buffer` 里找元素，然后用 index_k 算 attention。**实际不是**。两套数据各司其职：
+
+| buffer | 维度 | 用途 |
+|--------|------|------|
+| `index_k_with_scale_buffer` | 128 维压缩 K | **只打分**（MQA 算 score，用完即弃） |
+| `kv_buffer` | 576 维完整 latent `[V_nope\|K_rope]` | **只算 attention**（Top-K 位置精读） |
+
+topk 是连接两者的桥梁：用 index_k 算出的 score 选位置，再用位置取 kv_buffer 的 latent。
+
+```
+[1] indexer 打分
+    Q + index_k_with_scale_buffer(压缩K, MQA)  -- dsa_indexer.py:905-960
+      -> paged MQA -> logits[bs, num_kv_positions]  (每 KV 位置一个 score)
+
+[2] topk 选位置（在 logits 上选，不在 index_k 里！）
+    topk(logits, k=2048)  -- dsa_topk_backend.py
+      -> topk_indices[bs, 2048]  (选出的 2048 个 KV 位置索引)
+
+[3] 取 latent 做 sparse attention（latent 来自 kv_buffer，不是 index_k）
+    transform_index_page_table_decode:  topk_indices -> 查 page_table_1 -> slot 序列
+      kernel:  result = page_table[topk_indices]   (transform_index.py:62)
+    flash_mla_sparse_fwd(q, kv_cache=kv_buffer, indices=slot序列)
+      dsa_backend.py:2282  只读这 2048 个 slot 的完整 latent [V_nope(512)|K_rope(64)]
+      -> o [num_tokens, num_heads, v_head_dim]
+
+[4] attention 输出 o 的去向
+    o -> 返回 model forward -> 残差(h=h+o) + MLP -> 下一层 -> ... 78 层
+       -> 最终 hidden -> lm_head -> logits -> 采样下一个 token
+```
+
+**关键澄清**：
+- topk 在 **logits(score)** 上选，**不在 index_k 里选**
+- `index_k` 只算 score，不参与最终 attention；attention 用的是 `kv_buffer` 的完整 latent
+- `o` 不是最终输出，是**一层的中间结果**，送回 model forward 继续往后算直到采样
+
+**bs 与 topk 的关系**：`bs = forward_batch.batch_size`（当前运行请求数，受 `--max-running-requests` 控制，典型几十到几百），topk 的 2048 是**每请求**选的 KV 位置数，两者独立。logits 形状 `[bs, num_kv_positions]`，topk 对每行（每请求）独立选 2048 个位置。
+
+**`num_kv_positions` 的范围**：= 每请求当前 KV token 数 `seq_len`，构成 `seq_len = prefix_len(RadixCache 命中复用) + 本请求新生成 token`，decode 每步 +1。范围 `[prefix_len, max_context_len]`，上限 `max_context_len = model_config.context_len + extra_max_context_len`（model_runner_kv_cache_mixin.py:438，由 `--context-length` 或模型 `max_position_embeddings` 决定，GLM-5.2 长上下文可达 128K/256K+）。代码：`cache_seqlens_int32 = seq_lens + draft_token_num`（dsa_backend.py:736），indexer 用 `seqlens_32 = get_seqlens_int32()`（dsa_indexer.py:843）。batch 内 ragged、padding 到 `max_seq_len = block_tables.shape[1] * page_size`（dsa_indexer.py:831），topk 用 `lengths=seqlens` 对每请求 `[0, seq_len)` 实际范围选 Top-2048（dsa_topk_backend.py:37）。**这正是 DSA 存在的意义**：`num_kv_positions` 可达十几万，全量 `O(seq_len)` attention 不可行，DSA 先廉价打分再只精读 Top-2048，把复杂度降到 `O(2048)`。
 
 ## 第6章 KV Cache 淘汰与内存回收机制
 
