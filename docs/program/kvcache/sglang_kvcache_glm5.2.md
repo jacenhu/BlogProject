@@ -3975,15 +3975,15 @@ DSA 的强稀疏性（0.2%）来自 **per-token topk**--若按 page 选只有 13
 SGLang 的淘汰触发链是**按需触发**，不是定时轮询：
 
 ```
-alloc_token_slots(need_size)                          common.py:269
-  ├─ evict_from_tree_cache(tree_cache, need_size)     common.py:297
-  │    └─ allocator.available_size() < need_size?
-  │         └─ tree_cache.evict(EvictParams(num_tokens=need_size))   # standard 传 total（SWA 传 missing）
-  └─ allocator.alloc(need_size)
-       └─ if None → Out of memory (淘汰后仍不够)
+alloc_token_slots(tree_cache, num_tokens)             common.py:269
+  ├─ evict_from_tree_cache(tree_cache, num_tokens)    common.py:297
+  │    └─ allocator.available_size() < num_tokens?    # common.py:319
+  │         └─ tree_cache.evict(EvictParams(num_tokens=num_tokens))   # standard 传 total（SWA 传 missing）
+  └─ allocator.alloc(num_tokens)                      # common.py:281
+       └─ if None -> raise RuntimeError (OOM, 淘汰后仍不够)
 ```
 
-`evict_from_tree_cache`（`common.py:297`）触发淘汰：**standard 路径**（common.py:320）传 `num_tokens=need_size`（总数）；**SWA 路径**（common.py:312-315）传 `missing=need_size-available_size`（缺口）。`evict`（radix_cache.py:576）按 `while num_evicted < num_tokens` 淘汰到够量。这就是"硬阈值强制淘汰"——不够就逐出凑够，逐出完后还是不够 → 抛 OOM。
+`evict_from_tree_cache`（`common.py:297`）触发淘汰：**standard 路径**（common.py:320）传 `num_tokens`（即 alloc 请求的 num_tokens 总数）；**SWA 路径**（common.py:312-315）传 `missing=num_tokens-available_size`（缺口）。`evict`（radix_cache.py:576）按 `while num_evicted < num_tokens` 淘汰到够量。这就是"硬阈值强制淘汰"——不够就逐出凑够，逐出完后还是不够 → 抛 OOM。
 
 对于 Hybrid SWA 池，`evict_from_tree_cache` 同时检查 full 与 SWA 两个 allocator 的可用量（L309-318），向 `evict` 传 `swa_num_tokens` 额外参数。逐出过程本身通过 `evict` 方法（`radix_cache.py:563`）落地，Section 2.5.4 已详述——小顶堆排序 `evictable_leaves`、逐个 free 后 `_delete_leaf`、父节点若无子叶且 lock_ref=0 也进堆继续逐出。
 
