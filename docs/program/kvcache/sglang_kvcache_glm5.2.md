@@ -472,6 +472,8 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         self.release_pages = torch.empty((0,), dtype=torch.int64, device=device)
 ```
 
+**PagedTokenToKVPoolAllocator**（page_size>1，allocator/paged.py:105）的 free_pages 初始化类似但按 page：`num_pages = size // page_size`（paged.py:125），`clear()` 里 `free_pages = arange(1, num_pages+1)`（paged.py:276）。**size 来源**：`PagedTokenToKVPoolAllocator(size=self.max_total_num_tokens * self.dcp_size, page_size=self.page_size * self.dcp_size, kvcache=self.token_to_kv_pool, ...)`（model_runner_kv_cache_mixin.py:1141-1148）--由 **model_runner 创建并传 size**，**不是 DSATokenToKVPool 赋值**。DSATokenToKVPool（`token_to_kv_pool`，size=max_total_num_tokens，L855-856）和 allocator 共享同一个 `max_total_num_tokens`（model_runner 属性），`allocator.kvcache` 引用 DSATokenToKVPool（物理 buffer），但 free_pages 由 allocator.clear() 自己初始化。职责分离：DSATokenToKVPool 管物理 buffer（kv_buffer/index_k），allocator 管 page 分配（free_pages）。
+
 两个 GPU tensor：
 
 | 属性 | 类型 | 含义 |
@@ -3985,7 +3987,11 @@ alloc_token_slots(tree_cache, num_tokens)             common.py:269
 
 `evict_from_tree_cache`（`common.py:297`）触发淘汰：**standard 路径**（common.py:320）传 `num_tokens`（即 alloc 请求的 num_tokens 总数）；**SWA 路径**（common.py:312-315）传 `missing=num_tokens-available_size`（缺口）。`evict`（radix_cache.py:576）按 `while num_evicted < num_tokens` 淘汰到够量。这就是"硬阈值强制淘汰"——不够就逐出凑够，逐出完后还是不够 → 抛 OOM。
 
+**为什么 free(slot) 转 page 不会回收多了**：`allocator.free(x.value)`（radix_cache.py:579）把 slot 索引转成 page 回收（paged.py:266 `free_index // page_size` + `unique`），看似可能误伤同 page 的其他 node slot。但实际安全--`RadixKey.page_aligned`（radix_cache.py:136-140）在 insert 时把 node token 数截到 `page_size` 整数倍（L425），保证 **node 边界 = page 边界**：一个 page 的 slot 都属同一 node（独占），free 回收的是该 node 独占的整页，不误伤其他 node。partial page 尾部不入树（记 `cache_protected_len`，见 2.x），避免部分页回收问题。共享前缀时共享整页（`lock_ref` 防淘汰，free 只在 `lock_ref=0` 的 leaf evict 时调用，该 node 的 page 无其他引用）。page_size=1 时 `slot // 1 = slot`，每 slot 一页，也安全。
+
 对于 Hybrid SWA 池，`evict_from_tree_cache` 同时检查 full 与 SWA 两个 allocator 的可用量（L309-318），向 `evict` 传 `swa_num_tokens` 额外参数。逐出过程本身通过 `evict` 方法（`radix_cache.py:563`）落地，Section 2.5.4 已详述——小顶堆排序 `evictable_leaves`、逐个 free 后 `_delete_leaf`、父节点若无子叶且 lock_ref=0 也进堆继续逐出。
+
+**`tree_cache` 的具体类**（common.py:320 的 `tree_cache.evict` 多态调用）：由 `default_radix_cache_factory`（`registry.py:78`）选择。GLM-5.2（非 SWA、非 Mamba、非 hybrid）走两个分支--**默认 `RadixCache`**（radix_cache.py:280，`evict` 在 :563 硬阈值强制淘汰）；**启用 HiCache 时 `HiRadixCache`**（hiradix_cache.py:76，继承 RadixCache，覆写 `evict` 在 :1058，先软阈值降级 swap 再硬淘汰）。选择链 `registry.py:78-148`：ChunkCache（需 disable_radix_cache）-> RadixCacheCpp（实验）-> UnifiedRadixCache -> HiRadixCache（`enable_hierarchical_cache`）-> SWARadixCache/MambaRadixCache（GLM-5.2 均 False）-> LMCRadixCache -> RadixCache（默认 L146-148）。GLM-5.2 长上下文（1M）部署通常启用 HiCache，实际 `tree_cache` 多为 `HiRadixCache`。创建链路：`scheduler.py:430 kv_cache_builder.build_kv_cache` -> `scheduler.py:459 self.tree_cache = result.tree_cache`。
 
 HiCache 体系（第 10 章）增加**软阈值降级**：在显存未到硬阈值但接近时，先把低频节点写穿到 L2/L3 存储层，写入成功后把该节点的 `value` 清空（`backuped` 为 True）并标记 `host_value`，下次需要时 `load_back` 回灌——这就是"软阈值 Swap"比 evict 轻量之处：数据未丢，只是从 GPU 搬到了主机。
 
