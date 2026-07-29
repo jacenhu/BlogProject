@@ -1019,7 +1019,58 @@ shape = (num_pages, page_size * (index_head_dim + index_head_dim//quant_block_si
 # dtype = uint8
 ```
 
-每个页内：前 `64×128` 字节是 fp8 索引 K，后 `64×4` 字节（view 成 float32）是 per-block 量化 scale。K 数据与 scale 打包在同一块连续内存，便于 DSA 稀疏 Top-K 索引 kernel 直接读取。
+每个页内 8448 字节按 **[K 区 | scale 区] 分开**存储（**不是** 每 token 132 交替）。`memory_pool.py:3076-3079` 的注释是**正确**的：`buf[i, :page_size*head_dim]`（前 8192B）放 fp8 K，`buf[i, page_size*head_dim:]`（后 256B）放 fp32 scale。`index_buf_accessor.py:25-28` 的 `k: 128 item/token, s: 1 item/token` 只描述每 token 的*字节预算*（128+4=132），不表示物理交错。
+
+> **切勿被 `view(num_pages, 64, 1, 132)` 误导为"每 token 132 交替"。** 这里的 132 = 128+4 只是用来算页大小（64×132=8448）的每 token 字节预算；`.view(64, 1, 132)` 只是对 8448 字节页的一次 reshape，**不代表** `[i, t, 0, :128]=token t 的 K、[i, t, 0, 128:132]=token t 的 scale`。物理上 token t 的 K 在 `i*8448 + t*128`，scale 在 `i*8448 + 8192 + t*4`。
+
+**物理内存布局（一页 8448 bytes，[K 区 | scale 区] 分开）**：
+
+```
+page[i] 连续内存:
+┌────────────────────────────────────────────┬──────────────────────────┐
+│ K 区: 前 8192B = 64 token × 128B fp8 K     │ scale 区: 后 256B        │
+│ ┌────────┬────────┬─────┬────────┐         │ ┌────┬────┬─────┬────┐   │
+│ │token 0 │token 1 │ ... │token 63│         │ │t0  │t1  │ ... │t63 │   │
+│ │128B K  │128B K  │     │128B K  │         │ │4B  │4B  │     │4B  │   │
+│ └────────┴────────┴─────┴────────┘         │ └────┴────┴─────┴────┘   │
+│  token t 的 K @ offset t*128               │  token t 的 scale @ 8192+t*4 │
+└────────────────────────────────────────────┴──────────────────────────┘
+ ←────────── 8192 bytes ──────────────────→ ←──────── 256 bytes ────────→
+合计: 64 × 128 (K) + 64 × 4 (scale) = 8192 + 256 = 8448 bytes
+```
+
+**view 转换（给 kernel，仅 reshape，不改变 [K|scale] 分区事实）**：
+
+```python
+# dsa_indexer.py:899 (deep_gemm, CUDA) — 仅把 8448 字节页 reshape 成 (64,1,132)
+kv_cache_fp8.view(num_pages, 64, 1, 132)
+# dsa_indexer.py:1601 (AITER, HIP, 仅 _use_aiter_preshuffle/HIP 才走)
+buf.view(-1, 64, 132).view(fp8_dtype)
+# deep_gemm 不按 [i,t,0,:128]/[i,t,0,128:132] 读单 token; 而是用两个独立 TMA 描述符:
+#   tensor_map_kv       -> K 区  [num_pages, 64, 128] fp8  (页内偏移 0)
+#   tensor_map_kv_scales-> scale区[num_pages, 64]      fp32(页内偏移 8192)
+# 见 deep_gemm/.../sm90_fp8_paged_mqa_logits.cuh:206-209 / sm100_*.cuh:36-37
+```
+
+**举例（池 6400 token）**：`[100, 8448]` uint8 = 100 页 × 64 token × 132 bytes ≈ 825 KB/层。
+
+**和 MLA latent（kv_buffer）对比**：
+
+| | index_k_with_scale_buffer | kv_buffer (latent) |
+|--|--|--|
+| shape | `[num_pages, 8448]` | `[num_slots, 576]` |
+| 每 token | 132 bytes(128K + 4scale) | 576 维(512 nope + 64 rope) |
+| dtype | uint8(fp8 K + fp32 scale) | bf16 / fp8 |
+| 组织 | 按 page(64 token) | 按 token(slot) |
+| 用途 | indexer 打分(MQA) | attention 精读 |
+| 哪些层 | 21 full 层写入 | 78 层都有 |
+| 投影来源 | `wk`(indexer 专用) | `kv_a_proj`(MLA) |
+
+**写入 / 读取**：
+- **写入**（21 full 层）：`fused_store_index_k_cache`（dsa_indexer.py:1583，CUDA 主路径）把 key FP8 块量化（128值共享1个fp32 scale），**K 写页内 `offset*128`、scale 写页内 `8192+offset*4`**（fused_store_index_cache.cuh:70-72，`pointer::offset` 字节累加，见 sgl_kernel/utils.cuh:200）。fallback 路径 `set_index_k_scale_buffer`->`SetKAndS` triton（index_buf_accessor.py:373-387）写法相同。两条写入路径都是 [K 区 | scale 区] 分开，**非** 每 token 132 交替。
+- **读取**（indexer 打分）：`get_index_k_with_scale_buffer` -> `view[num_pages,64,1,132]` -> `deep_gemm.fp8_paged_mqa_logits`。deep_gemm 用**两个独立 TMA 描述符**分别连读 K 区（前 8192B，64×128 fp8）和 scale 区（后 256B，64×fp32），Q×K（用 scale 反量化）算 per-token score。权威构造见 `fp8_mqa_logits_make_fused_kv`（utils.py:310-329：`fused[blk,:8192]=K`、`fused[blk,8192:]=scale` 再 `.view(n,64,1,132)`），并由 test_deepgemm_paged_mqa_logits.py 对照参考验证。
+
+**关键设计**：按 page(64) 组织（内存局部性）+ [K 区 | scale 区] 分开（K 连续 8192B 一次 coalesced load + scale 连续 256B 一次 coalesced load，比 64 次交错读取高效）+ FP8 块量化（省 ~48% 显存，132 vs bf16 256 bytes）+ MQA（`num_heads_kv=1`，算量 1/N）+ 每 token 粒度（支持精确 per-token 打分 + topk）。
 
 平台约束（L3056）：
 
@@ -2833,7 +2884,7 @@ def set_kv_buffer_prefix_valid(self, layer, loc_2d, commit_lens, cache_k, cache_
 
 **DSA 稀疏写入——GLM-5.2 实际场景**：
 
-GLM-5.2 不使用 SWA。KV 写入的控制由 DSA 的 `indexer_types` 决定：只有 `"full"` 的 21 层需要生成并写入 `index_k_with_scale_buffer`，`"shared"` 的 57 层在 attention 时直接复用同组 full 层的索引。索引写入走标准 DSA 路径：
+GLM-5.2 不使用 SWA。KV 写入的控制由 DSA 的 `index_topk_pattern`/`index_topk_freq`（config 字段）决定：`dsa_layer_skips_topk`（model_config.py:180）按 `pattern[layer_id]=="S"` 或 `freq` 取模判断，`skip_topk=False` 的 21 个 full 层跑 `self.indexer` 生成并写入 `index_k_with_scale_buffer` + 算 topk_indices；`skip_topk=True` 的 57 个 shared 层不跑 indexer（checkpoint 无 indexer 权重），经 `prev_topk_indices` 层间传递（deepseek_v2.py:2601）复用 full 层的 topk_indices，**不写不读 index_k**（forward_mla.py:200 注释："shared layers' cache is never read, filling it is dead work"）。索引写入走标准 DSA 路径：
 
 ```python
 class HybridLinearKVPool(KVCache):
@@ -2857,7 +2908,7 @@ SWA 截断在写入前发生：`free_swa_out_of_window_slots`（`common.py:69`�
 |---|---|---|
 | 长上下文分段 | chunked prefill + `set_kv_buffer_prefix_valid` | 零改动（config 设 `chunked_prefill_size`） |
 | DSA 索引写入（full 层） | `DSATokenToKVPool.set_index_k_scale_buffer` | 零改动（DSA backend 通用） |
-| DSA 索引复用（shared 层） | 复用同组 full 层 index buffer，不额外写入 | attention backend 需配置 shared index lookup（backend 已有 indexer 逻辑） |
+| DSA 索引复用（shared 层） | 复用 full 层的 topk_indices（`prev_topk_indices` 层间传递），不跑 indexer、不写 index_k | `should_run_indexer`（forward_mla.py:184）按 `skip_topk` 判断 |
 | MLA latent 写入 | `DSATokenToKVPool.set_mla_kv_buffer`（继承自 MLA） | 零改动（MLA backend 通用） |
 
 综合：GLM-5.2 的长上下文写入完全复用 SGLang 已有 chunked prefill + DSA/MLA 写入基础设施。物理池侧的 `DSATokenToKVPool`、`index_buf_accessor` 无需改动——GLM-5.2 和 DeepSeek-V3.2 共享同一套 DSA 写入路径。
@@ -3651,6 +3702,270 @@ topk_indices[:, :valid_topk] = topk_local_indices                # L232 只填�
 
 **判断是 per-request `seq_len`（`lengths=seqlens`），不是 batch 的 `max_seq_len`**：`max_seq_len < 2048` → 整个 batch 全选；`max_seq_len >= 2048` 但个别请求 `seq_len < 2048` → 那些请求全选、长请求稀疏（混合）。**2048（`index_topk`）是稀疏生效的阈值，DSA 为长上下文设计，短请求享受不到稀疏红利。**
 
+### 5.7.3 index_k 的计算与 kv_buffer 的关系：两套独立投影
+
+**index_k 怎么算**--indexer 层有自己专用的投影参数（独立于 MLA attention 层）：
+
+```
+hidden state x (6144维)
+  ├─[1] K 投影: key_raw = self.wk(x)         dsa_indexer.py:426(定义)/2073(调用)
+  │        wk: hidden_size(6144) -> index_head_dim(128)   ← indexer 专用 W_K
+  ├─[2] LayerNorm: key = self.k_norm(key_raw)  L440(定义)/649(调用)
+  ├─[3] RoPE: self.rotary_emb                  L443 (融合在 fused_k_indexer_norm_rope_store L678)
+  └─[4] FP8 块量化(128值共享1个fp32 scale) -> index_k_with_scale_buffer
+                                               L700 _store_index_k_cache / L678 fused
+```
+
+融合路径把 norm+RoPE+量化+存储一次完成：`fused_k_indexer_norm_rope_store(key_raw, get_index_k_with_scale_buffer(layer_id), ...)`（dsa_indexer.py:678）。indexer 专用参数：`self.wk`(L426)、`self.wq_b`(L409)、`self.k_norm`(L440)、`self.rotary_emb`(L443)。
+
+**和 kv_buffer 的关系：无直接数据关系**。两者都从 hidden state `x` 出发，但是**两套独立投影产生的不同 K 表示**：
+
+| | index_k | kv_buffer(latent) |
+|--|--|--|
+| 投影矩阵 | `wk(x)` indexer 专用(L426) | `kv_a_proj(x)` MLA 下投影 |
+| 维度 | 128(`index_head_dim`) | 576(`[V_nope(512)\|K_rope(64)]`) |
+| 后处理 | norm + RoPE + **FP8 块量化** | latent 直接存 + K_rope 经 RoPE |
+| 用途 | indexer 打分(MQA) | attention 精读 |
+| 精度 | FP8 压缩(132 = 128 K + 4 scale) | BF16 / FP8 latent |
+| 参数归属 | indexer 层(`self.wk`/`self.k_norm`) | MLA attention 层(`kv_a_proj`/`kv_b_proj`) |
+
+关键：
+- `index_k` 用 **indexer 层自己的 `wk` 投影**，和 MLA 的 `kv_a_proj`（下投影到 512 latent）是**完全不同的投影矩阵**
+- 两者**不是同一份数据的不同压缩**，而是从 hidden state 各自独立投影产生的两套表示
+- 这就是 GLM-5.2 必须存**两份** KV 数据（`index_k_with_scale_buffer` + `kv_buffer`）的原因--各自服务不同阶段（打分 vs 精读），无法互相替代
+
+**类比搜索引擎**：`index_k`（128维 fp8）= 倒排索引/摘要，快速检索相关 page（indexer 打分）；`kv_buffer`（576维 latent）= 原文，精读 Top-K page（attention）。先建索引廉价检索，再读原文精读--这是 DSA 两阶段省算力的数据基础。
+
+### 5.7.4 每 token 粒度与跨层存储：latent 78 层都存，index_k 只 21 full 层存
+
+**粒度（单层视角，每 token 一份）**：
+- **latent**：每 token 一个 576 维 `[V_nope(512)|K_rope(64)]`。布局 `kv_buffer [num_slots, kv_cache_dim=576]`，每 slot(token)一个。
+- **index_k**：每 token 一个 132 字节(128 fp8 K + 4 scale)。布局每页 8448 = 64×132（dsa_indexer.py:899 `view[num_pages, 64, 1, 132]`），每 page 64 slot，每 slot 132B = **每 token 一个**。
+
+**跨层存储**：
+
+| | latent (kv_buffer) | index_k |
+|--|--|--|
+| 写入层 | **78 层全部** | 仅 **21 个 full**（`skip_topk=False`）层 |
+| 复用 | 无（每层独立） | 57 个 shared 层复用 full 的 **topk_indices**（非 index_k） |
+| 每 token 份数 | 78 | 21 |
+
+文档 L2836 已记录：21 个 full 层（`skip_topk=False`）跑 `self.indexer` 写 `index_k_with_scale_buffer` + 算 topk_indices；57 个 shared 层（`skip_topk=True`）不跑 indexer，经 `prev_topk_indices` 层间传递（deepseek_v2.py:2601）复用 topk_indices，**不写不读 index_k**。
+
+**每 token 总存储量**：
+```
+latent:  78 层 × 576 维 × 2B(bf16) ≈ 89,856 字节/token
+index_k: 21 层 × 132 字节(fp8+scale) = 2,772 字节/token   ← 仅占 latent 的 ~3%
+```
+index_k 每 token 仅占 latent 的 ~3%，是"廉价打分"通道的存储基础。
+
+**shared 层复用原理**：`should_run_indexer`（forward_mla.py:184）按 `skip_topk` 判断--full 层跑 `self.indexer` 算 index_k + topk_indices；shared 层（`skip_topk=True`，checkpoint 无 indexer 权重）复用上一层传来的 `prev_topk_indices`（deepseek_v2.py:2601），不跑 indexer、不写不读 index_k（注释 forward_mla.py:200："shared layers' cache is never read, filling it is dead work"）。`skip_topk` 由 `dsa_layer_skips_topk(config, layer_id)`（model_config.py:180）按 `index_topk_pattern`/`index_topk_freq` 决定。
+
+**indexer 权重命名与哪些层有**：indexer 构造 `prefix=add_prefix("indexer", prefix)`（deepseek_v2.py:1671），权重在 checkpoint 命名 `model.layers.{i}.self_attn.indexer.{wq_b,wk,wk_weights_proj,weights_proj,k_norm}.weight`。**只 21 个 full 层的权重文件有 indexer 权重**，57 个 shared 层的 checkpoint **没有**（forward_mla.py:190 注释："shared layers carry no indexer weights in the checkpoint"）。代码虽每层 `self.indexer = Indexer(...)`（deepseek_v2.py:1658 无条件创建），但 shared 层 `skip_topk=True` 不跑 indexer（权重未加载也不用）、复用 `prev_topk_indices`，省下 57 层的 indexer 权重存储。
+
+### 5.7.5 MLA Q/K/V 生成机制：K/V 压缩成 latent
+
+GLM-5.2 用 MLA，Q/K/V 生成和标准 MHA 不同--K/V 压缩成 latent，**不存完整 K/V**。
+
+**a/b 命名含义**：`q_a_proj`/`q_b_proj` 的 a/b 代表 MLA 低秩分解两阶段--**a=下投影**（压缩 hidden->latent）、**b=上投影**（还原 latent->Q/K/V），类似 LoRA 的 A/B 矩阵或自动编码器 encoder/decoder。`with_mqa` 后缀表示 KV 下投影带 MQA（MLA 的 KV 单 head 共享）。沿用 DeepSeek/低秩分解命名约定（简洁，矩阵论常用 A/B 表示分解两部分）。
+
+**Q 生成（下投影 + 上投影 + 拆分）**：
+```
+x (6144)
+ ├─ 下投影 q_a = x @ W_QA (fused_qkv_a_proj_with_mqa, deepseek_v2.py:1619) -> 2048
+ ├─ norm
+ ├─ 上投影 q = q_a @ W_QB (q_b_proj, :1627) -> num_heads×(192+64)
+ └─ 拆分 q_nope(192), q_rope(64)        ← Q 不存储，用完即弃
+```
+
+**K/V 生成（下投影成 latent，不存完整 K/V）**：
+```
+x (6144)
+ ├─ 下投影 c = x @ W_KV (kv_a_proj_with_mqa, :1646) -> [512|64]   forward_mla.py:428
+ ├─ 拆分 k_nope_latent = c[:512], k_rope_raw = c[512:]            L429
+ ├─ norm(k_nope_latent) (kv_a_layernorm)                          L430
+ ├─ RoPE(k_rope_raw) -> k_rope
+ └─ 存储 [k_nope_latent(512)|k_rope(64)] = 576 维 latent          set_mla_kv_buffer L2097
+```
+
+**attention 还原（absorb 模式，完整 K/V 从不显式构造）**：
+- **K_nope**：`W_UK` 吸收到 Q 侧，`q' = q_nope @ W_UK`（forward_mla.py:449-468 `deep_gemm grouped_gemm(q_nope, w_kc)`），`q' @ k_nope_latent` 等价 `q_nope @ K_nope`--避免显式还原 K，省算力
+- **V**：`V = k_nope_latent @ W_UV`（kv_b_proj，:1686）用时还原
+
+这就是 MLA 核心：存压缩 latent（576维）而非完整 K/V，attention 时通过 absorb 还原，显存和算力都省。
+
+**每个 token 都有 Q K V，但形态不同**：
+
+| | Q | K/V |
+|--|--|--|
+| 每 token 都有 | 是 | 是 |
+| 存储 | **不存储**（用完即弃） | **压缩 latent（576维）** |
+| 完整 K/V | - | **从不存储**，absorb 还原 |
+| 跨层 | 每层每 token 算一次 | 每层每 token 存一个 latent（78 份/token） |
+
+- **Q**：每 token 每层都算（参与 attention），只在当前 batch 内存，不落盘
+- **K/V**：每 token 每层都存压缩 latent，完整 K/V 永不存储
+- **prefill**：所有 token 算 Q + 存 latent；**decode**：当前 token 算 Q + 存 1 个 latent，与所有历史 latent 算 attention
+
+**embedding 来源与词汇表关系**（Q/K/V 生成的输入端）：
+
+```
+token id ∈ [0, vocab_size)
+  -> 查 embedding 表 [vocab_size × 6144]   ← 词汇表相关权重（输入端）
+  -> embedding x (6144)
+  -> @ W_QA / W_KV 等                       ← Q/K/V 投影（与词汇表无关）
+  -> Q / K/V
+```
+
+| 权重 | 维度 | 和词汇表相关? |
+|------|------|--------------|
+| embedding 表 | vocab_size × 6144 | ✅（输入端，token id -> x） |
+| Q/K/V 投影（W_QA/W_KV 等） | 6144 × 2048/576 | ❌（作用于 hidden 维度） |
+| lm_head | 6144 × vocab_size | ✅（输出端，x -> vocab logits） |
+
+- **投影矩阵**（W_QA/W_QB/W_KV/W_UK/W_UV）是权重，checkpoint 存储，所有 token 共享；**Q/K/V 本身是激活值**（非权重，Q 丢弃、K/V 存 cache）
+- 词汇表只在输入端（embedding 表）和输出端（lm_head）相关，中间 Q/K/V 投影作用于 hidden 维度，与词汇表无关
+
+**embedding 表的查表机制**：`embed_table [vocab_size × 6144]` 是权重矩阵，每行对应一个 token id 的嵌入向量。查表 `embedding = embed_table[token_id]`--token id 作行索引取对应行（等价 one-hot × 矩阵）。类比"词义字典"，每个词一页（一行向量），token id 是页码。
+
+**W_QA/W_KV 权重共享**：W_QA、W_KV 是全局权重，所有 token **共用同一组**（`self.q_b_proj` deepseek_v2.py:1627、`kv_a_proj_with_mqa` :1646 是层属性，该层所有 token forward 共用）--不同 token 的 Q/K/V 不同是因为 embedding 输入不同（token id 不同 -> 查表得不同 x），**而非权重不同**。权重共享 + 输入不同 -> 输出不同，这是神经网络本质（权重共享保效率与泛化，若每 token 用不同 W 参数量爆炸）。
+
+**跨层独立 vs 同层共享**：78 层各有**独立的 W_QA/W_KV**（跨层不同），但同层内所有 token 共用该层的 W_QA/W_KV。权重文件（`.safetensors`）以命名张量存储，如 `model.layers.{i}.self_attn.q_a_proj.weight`、`model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight`--每层一个独立 tensor（命名带 layer id，值不同）。`make_layers`（glm4_moe.py:1067）创建 78 个层，每层 `__init__` 实例化自己的投影。不同层学不同抽象（浅层语法/深层语义），故跨层独立；同层跨 token 共享保效率泛化。
+
+| 维度 | W_QA/W_KV |
+|------|-----------|
+| 跨层（layer 0 vs 1） | **不同**（每层独立权重，各自训练） |
+| 同层跨 token | **相同**（该层所有 token 共用） |
+
+### 5.7.6 K/V 生成独立 vs attention 计算依赖：KV cache 存在的本质理由
+
+理解 KV cache 的核心区分：
+
+| | K/V **生成/存储** | attention **计算**（Q×K^T） |
+|--|--|--|
+| token 间依赖 | **无**（独立） | **有**（Q 和所有 K 交互） |
+
+**K/V 生成是 token 独立的**：每个 token 的 latent 只由**自己的 hidden state** 投影得到，不看其他 token：
+
+```
+latent_i = x_i @ W_KV      # token i 的 latent，只依赖 x_i
+```
+
+- token A 的 latent 不依赖 token B
+- prefill 时所有 token 的 K/V **并行独立**计算
+- 代码：`kv_a_proj_with_mqa(hidden_states)`（forward_mla.py:428）对 `hidden_states` 每行（token）独立投影
+
+**attention 计算必然依赖所有历史 K/V**：预测下一个 token，当前 Q 要查询所有历史 K，加权 V，融合前文上下文：
+
+```
+预测 "周五" 的 "五":
+  当前 "周" 的 Q -> 查询历史 K [今,天,是,周,几] -> 加权 V -> 融合上下文 -> "五"
+```
+
+"周"单独无法预测下一个（可能是"周末""周围""周期"...），只有结合前文"今天是周几"才知道接"五"。历史 K/V 编码前文信息，Q 查询它们获取上下文。
+
+**KV cache 的意义**：
+
+| | 无 KV cache | 有 KV cache |
+|--|--|--|
+| decode 第 N 步 | 重算前 N 个 token 的 K/V | 直接读 cache |
+| 总开销 | O(N²) | O(N) |
+| 每步 | 算 N 个 token 的 K/V | 只算 1 个新 token 的 Q/K/V |
+
+decode 每步当前 Q 要和所有历史 K/V 交互，历史已存 cache，只需算 1 个新 token 的 Q/K/V + 和 cache 做 attention。
+
+**两者结合**：K/V 生成 token 独立（可并行、可缓存），attention 计算必然依赖所有历史 K/V（上下文融合）--后者正是 KV cache 存在的理由。prefill 各 token 独立算 K/V 存 cache，decode 当前 Q 和 cache 里所有历史 K 算 attention。
+
+### 5.7.7 澄清:prefill 最后一个 token 的采样经过了与所有前文 K/V 的 attention
+
+**常见误解**:既然"K/V 生成独立",prefill 最后一个 token 采样得到 decode 第一个 token 时,是不是没经过与前面 token 的 attention?
+
+**实际不是**。最后一个 token 和所有其他 token 一样走完整 78 层 attention,每层都和前面所有 token 的 K/V 交互:
+
+```
+最后一个 token "几" 在每层:
+  1. 生成自己的 Q/K/V            ← 独立(只看自己 x)
+  2. attention: Q 和前面所有 token(今/天/是/周/几,含自己,因果 mask)的 K 算相似度,加权 V
+     → output 融合"今天是周几"上下文   ← 交互!
+  3. output -> MLP -> 下一层
+```
+
+78 层后,"几"的 hidden state 已融合全部前文(每层 attention 都和前面 token 交互)-> lm_head -> logits -> sample -> "周"。
+
+**"K/V 生成独立"和"最后 token 经过 attention"不矛盾**:
+
+| 环节 | 独立? | 说明 |
+|------|------|------|
+| K/V 生成(投影 `latent = x @ W_KV`) | ✅ 独立 | 每 token 只看自己 |
+| attention 计算(Q × 所有历史 K) | ❌ 交互 | 最后 token 的 Q 和前面所有 K 算 |
+| 最后 token 的 output(采样用) | - | attention 后的结果,已融合前文 |
+
+**prefill attention 全貌**:所有 token(不只最后一个)都走 78 层 attention(`forward_extend` dsa_backend.py:1811, `causal=True` L2068)--各自 Q 和前面 K 交互(因果 mask,token i 只看 ≤i)。所有 token 的 K/V 都存 cache(供 decode),**只有最后一个 token 的 logits 用于 sample**(`model_runner.py:3286` `seq_lens - 1`,预测"下一个")。
+
+所以最后一个 token 的采样是 78 层 attention(和前面所有 K/V 交互)后的结果,融合了全部前文--"K/V 生成独立"指投影环节,attention 计算仍是交互的。
+
+### 5.7.8 为什么 prefill 必须算所有 token,而不是只算最后一个
+
+**疑问**:prefill 所有 token 算 attention,只有最后一个 sample,是不是浪费?
+
+**不浪费,是必需的--attention 逐层累加,每层所有 token 的计算是下一层的输入**。
+
+关键:第 L 层 token i 的 K/V 和 Q,**依赖第 L-1 层 token i 的 output**(hidden state):
+
+```
+第 1 层: 所有 token Q/K/V(从 embedding) -> 每个 token i attention -> output_i
+第 2 层: K_i = f(第1层 output_i) -> token i attention -> output_i
+...
+第78层: 最后 token Q × K_{≤last}(K 来自第77层所有 output) -> sample
+```
+
+要算第 78 层最后 token 的 attention,需第 78 层前面所有 token 的 K,这些 K 来自第 77 层所有 token output--**逐层回溯,需第 1 层所有 token output**。跳过任何层任何 token,后面层 K 断链,最后 token 无法计算。
+
+**如果某层只算最后 token**:其他 token 无 output -> 下一层其他 token 无 hidden state -> 算不出 K -> 最后 token 下层 attention 无前面 K -> 无法算。
+
+**已做的优化**:attention 必须算所有 token(逐层依赖,不可省),但 **sample 只取最后一个**(`model_runner.py:3286` `seq_lens - 1`)。
+
+| 环节 | 计算量 | 能否省 |
+|------|--------|--------|
+| attention(所有 token × 78 层) | O(N²)/层 | ❌ 不可省(逐层依赖) |
+| sample | 只最后 1 个 | ✅ 已省 |
+
+**代码佐证**:`deepseek_v2.py` 模型 forward 78 层循环,每层 `layer(hidden_states)` 的 `hidden_states` 是上一层所有 token output;每层 `kv_a_proj(hidden_states)` 算 K/V--K 依赖上一层所有 token output。类比建 78 层高楼:顶楼(最后 token 最终表示)需第 77 层支撑,逐层下推,每层都要建全(所有 token),不能只建顶楼。
+
+### 5.7.9 粒度澄清:indexer per-token 打分,page=64 是计算组织不是 score 粒度
+
+**常见误解**:indexer 每 page(64 token)算一个 score,选 Top-2048 page,attention 读 2048×64=131072 token 的 latent。
+
+**实际不是**。indexer 打分是 **per-token**(每历史 token 一个 score),topk 选 **2048 token**,attention 读 **2048 token** 的 latent(不是 2048×64)。
+
+**证据链**:
+
+1. **logits 输出 per-token**：`fp8_paged_mqa_logits` 输出 `o: T.Tensor[(N, S)]`，**S = max_seq_len（token 数）**（tilelang_kernel.py:1426），不是 page 数。每 token 一个 score。
+2. **topk 在 token 级选**：`_topk_unfused`（dsa_topk_backend.py:197）的 `lengths=seqlens`（token 级），在 `[0, seqlen)` token 范围选 Top-2048。
+3. **transform page_size=1**：`transform_index_page_table_decode`（dsa_backend.py:2136）用 `page_size=1`，`page_table_1` 是 **token 级**（每 token 一个 slot），topk_indices 索引 token。dsa_backend.py:177 注释："this table is always with page_size = 1"。
+4. **attention 读 2048 slot**：`flash_mla_sparse_fwd(indices=page_table_1)`，page_table_1 是 2048 个 slot（token），读 **2048 token** 的 latent。
+
+**page=64 是计算组织粒度,不是 score 粒度**：page_size=64 是 indexer 计算的组织粒度（按 page 遍历 K 提升效率），不是 score 粒度。`kv_cache_fp8.view(num_pages, 64, 1, 132)`（dsa_indexer.py:899）按 page 组织 K，kernel 遍历 page（tilelang L1443-1445），但对 page 内 64 token 各算一个 score，输出 per-token（`o[N, max_seq_len]`）。page=64 是 K 的存储/计算组织（内存局部性），score 仍是 per-token。
+
+**完整粒度链**：
+
+```
+indexer 打分: per-token score [bs, max_seq_len]    ← 每 token 一个 score
+  (page=64 是计算组织,kernel 遍历 page 算 per-token score)
+topk:        选 Top-2048 token                      ← token 级,lengths=seqlens
+transform:   token 索引 -> slot(page_size=1)        ← 2048 个 slot
+attention:   读 2048 token 的 latent                ← 不是 2048×64 = 131072
+```
+
+**稀疏比对比**：
+
+| 假设 | topk 选 | attention 读 | 稀疏比(1M 上下文) |
+|------|---------|-------------|-------------------|
+| 误解 | 2048 page | 2048×64 = 131072 token | 13% |
+| **实际** | **2048 token** | **2048 token** | **0.2%** |
+
+DSA 的强稀疏性（0.2%）来自 **per-token topk**--若按 page 选只有 13%。`index_k_with_scale_buffer` 按 page(64)存储 + dsa_indexer.py:824 `assert page_size==64` + kv_cache view [num_pages,64,...] 容易让人误以为 score 也 per-page，但 score 实际 per-token，page=64 只是 K 的存储/计算组织粒度。
+
 ## 第6章 KV Cache 淘汰与内存回收机制
 
 淘汰（eviction）是"把树缓存中不再需要或优先级最低的 KV 前缀逐出、将其物理 slot 归还给 allocator"的系统级反压机制。不是每个请求结束时才回收——那叫"释放"（release）。淘汰发生在显存不足时才触发，是 SGLang 保证长服务永远不 OOM 的关键。
@@ -3663,12 +3978,12 @@ SGLang 的淘汰触发链是**按需触发**，不是定时轮询：
 alloc_token_slots(need_size)                          common.py:269
   ├─ evict_from_tree_cache(tree_cache, need_size)     common.py:297
   │    └─ allocator.available_size() < need_size?
-  │         └─ tree_cache.evict(EvictParams(num_tokens=need_size - available))
+  │         └─ tree_cache.evict(EvictParams(num_tokens=need_size))   # standard 传 total（SWA 传 missing）
   └─ allocator.alloc(need_size)
        └─ if None → Out of memory (淘汰后仍不够)
 ```
 
-`evict_from_tree_cache`（`common.py:297`）计算出缺口：`num_tokens_missing = need_size - allocator.available_size()`，然后调 `tree_cache.evict(EvictParams(num_tokens=num_tokens_missing))`。这就是"硬阈值强制淘汰"——不够就逐出凑够，逐出完后还是不够 → 抛 OOM。
+`evict_from_tree_cache`（`common.py:297`）触发淘汰：**standard 路径**（common.py:320）传 `num_tokens=need_size`（总数）；**SWA 路径**（common.py:312-315）传 `missing=need_size-available_size`（缺口）。`evict`（radix_cache.py:576）按 `while num_evicted < num_tokens` 淘汰到够量。这就是"硬阈值强制淘汰"——不够就逐出凑够，逐出完后还是不够 → 抛 OOM。
 
 对于 Hybrid SWA 池，`evict_from_tree_cache` 同时检查 full 与 SWA 两个 allocator 的可用量（L309-318），向 `evict` 传 `swa_num_tokens` 额外参数。逐出过程本身通过 `evict` 方法（`radix_cache.py:563`）落地，Section 2.5.4 已详述——小顶堆排序 `evictable_leaves`、逐个 free 后 `_delete_leaf`、父节点若无子叶且 lock_ref=0 也进堆继续逐出。
 
@@ -4250,6 +4565,46 @@ FP8 KV 存储用 uint8 做 `index_put`，读写时 view(fp8_dtype) 还原。`set
 
 MoE 的专家层是 FFN，不产生 KV——KV 的分布与 MoE EP 路由解耦。attention 层在 TP 组内按 head 切 KV，MoE FFN 的 EP 在 attention layer 间穿插，各 EP rank 的 attention 层 KV 各存各的。路由 token 从 KV_rank_A 的 attention 输出后可能路由到 FFN_rank_B，但返回 attention_rank_A 时 KV 仍原地——"token 路由走、KV 原地留"。
 
+### 8.7.1 MoE 专家 MLP 结构与 SwiGLU 命名
+
+**命名路径**（以 `model.layers.55.mlp.experts.11.down_proj.weight [6144, 2048] BF16` 为例）：
+
+```
+model.layers.55.mlp.experts.11.{gate,up,down}_proj.weight
+  │       │      │   │        │
+  │       │      │   │        └─ 11: 第 11 个专家(256 路由专家之一)
+  │       │      │   └─ experts: 专家集合
+  │       │      └─ mlp: MLP(FFN)模块
+  │       └─ layers.55: 第 55 层(>3,MoE 层)
+```
+
+**三投影 SwiGLU 结构**：每个专家是独立 MLP，用 SwiGLU 门控：
+
+| 权重 | shape | 方向 | 作用 |
+|------|-------|------|------|
+| `gate_proj` | [2048, 6144] | 6144 -> 2048 | 门控投影(经 SiLU) |
+| `up_proj` | [2048, 6144] | 6144 -> 2048 | 上分支(不激活) |
+| `down_proj` | [6144, 2048] | 2048 -> 6144 | 下投影(还原) |
+
+```
+x (6144)
+ ├─ gate_proj -> gate (2048) -> SiLU(gate)
+ ├─ up_proj   -> up   (2048)
+ ├─ SiLU(gate) * up = mid (2048)    ← 门控激活(逐元素相乘)
+ └─ down_proj -> y (6144)            ← 还原回 hidden
+```
+
+即 `y = down_proj(SiLU(gate_proj(x)) * up_proj(x))`。维度对照 config：`hidden_size=6144`、`moe_intermediate_size=2048`。PyTorch `nn.Linear` 权重 shape = `[out, in]`（反的）：`gate_proj [2048,6144]` 即 out=2048/in=6144。
+
+**up/down 命名是分支位置，不是维度方向**（易混淆）：
+- `up_proj` 的 "up" = **上分支**（和 gate 并行的另一条分支），**不是升维**--实际降维（6144->2048，和 gate 同方向）
+- `down_proj` = 下投影还原，**才升维**（2048->6144）
+- 对比 MLA 的 a/b（a 降维 b 升维，按维度方向）：SwiGLU 的 up/down 按分支位置（up 降维 down 升维），两套命名约定不同，"上"在两套里含义不同
+
+**MoE 配置**（config A.4）：`n_routed_experts=256`、`num_experts_per_tok=8`（Top-8 稀疏激活）、`moe_intermediate_size=2048`、`first_k_dense_replace=3`（前 3 层 dense，后 75 层 MoE）、`n_shared_experts=1`、`scoring_func="sigmoid"`。每 token：router 打分 -> 选 Top-8 专家 -> 各算 `y_i` -> 加权求和（+共享专家）。稀疏激活（8/256），但全部 256 专家权重都存显存（每专家 3 权重 BF16 ≈ 75MB，256 专家 ≈ 19GB/层）。
+
+**与 KV cache 关系**：MLP/FFN **不产生 KV**（token 内变换，无 token 间交互），KV 只由 attention 层产生。MoE 专家权重属于 FFN，KV cache 不存这些。
+
 ### 8.8 [GLM-5.2 推演] 结合 MLA + DSA + MoE 的综合 KV Cache 架构设计方向
 
 **前置声明**：GLM-5.2 的 `GlmMoeDsaForCausalLM` 架构已在 SGLang `release/v0.5.15` 中注册（`model_config.py:112`），MTP index sharing 等特性已合入。KV 物理池通过 `DSATokenToKVPool` 直接复用，与 DeepSeek-V3.2 共享同一套基础设施。本节基于真实 `config.json`（附录 A.4）进行具体的适配方案分析。
@@ -4265,10 +4620,10 @@ GLM-5.2 共 **78 层** attention，**全部使用 DSA**（不是 dense/sparse �
   │     kv_lora_rank=512, qk_rope_head_dim=64, kv_cache_dim=576
   │
   ├─ DSA indexer (index_k_with_scale_buffer):
-  │     indexer_types 决定哪些层独立维护索引 K:
-  │       "full"   : 21 层 (每 4 层一组的第 1 层) — 独立索引
-  │       "shared" : 57 层 — 复用同组 full 层的索引
-  │     物理上 78 层都分配 index buffer，但只有 "full" 的 21 层写入数据
+  │     index_topk_pattern/index_topk_freq 决定哪些层独立维护索引 K:
+  │       full (skip_topk=False)   : 21 层 - 跑 indexer,算 index_k + topk_indices
+  │       shared (skip_topk=True)  : 57 层 - 复用 full 层的 topk_indices(prev_topk_indices),不碰 index_k
+  │     物理上 78 层都分配 index buffer，但只有 21 个 full 层写入 index_k(shared 层不写不读)
   │
   └─ FFN 层 (不产生 KV):
         mlp_layer_types 决定 FFN 类型:
