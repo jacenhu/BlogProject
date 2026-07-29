@@ -4013,6 +4013,17 @@ class PriorityStrategy:  return (node.priority, node.last_access_time)   # 低�
 class SLRUStrategy:      return (is_protected, node.last_access_time)    # 分段 LRU
 ```
 
+**关键设计:值越小越先淘汰（min-heap）**：`get_priority` 返回值小的 node 在 `heapq.heapify`（radix_cache.py:573）后位于堆顶，`heappop`（L577）先弹出淘汰。配合 `eviction_heap = [(get_priority(node), node), ...]`（L570-572），堆按 priority 排序。
+
+**元组多级排序**（Python 字典序）：返回元组的策略按第一关键字比，相同再比第二：
+- **LFU** `(hit_count, last_access_time)`：命中少先淘汰，同命中数比时间（旧先淘汰）
+- **SLRU** `(is_protected, last_access_time)`：probationary(0) 先淘汰，protected(1) 后，同段比时间
+- **Priority** `(priority, last_access_time)`：低优先级先淘汰，同级 LRU
+
+**SLRU 分段**（L41-55）：`protected_threshold=2`（默认），`hit_count < 2` -> probationary（段 0，先淘汰）；`>= 2` -> protected（段 1，受保护）。新节点 probationary，多次命中升 protected，保护热数据。
+
+**负号反转**（MRU/FILO）：`-last_access_time`/`-creation_time` 把"大值（最近/最新）"转成"小值（堆顶）"，实现"最近/最新的先淘汰"（语义反转）。
+
 注册表 `utils.py:55` 通过字符串名映射到类，`get_eviction_strategy(name)` 按名查表实例化。
 
 **各策略的适用场景与权衡**：
@@ -4053,28 +4064,11 @@ VIP 请求（`priority=100`）的前缀路径上所有节点都被"拉高"到 10
 
 ### 6.3 [GLM-5.2 适配] DSA 稀疏 KV 管理：索引一致性与淘汰策略
 
-- **SWA 窗口外 KV 强制过期**
-
-`free_swa_out_of_window_slots`（`common.py:69`）是 SWA 层淘汰的精确入口。它判断当前 token 位置 `pre_len` 超过滑动窗口 `sliding_window_size` 后，把窗口外的 slot 强制释放：
-
-```python
-evict_threshold = pre_len - max(sliding_window_size, page_size)  # Radix cache 路径
-new_swa_evicted_seqlen = max(req.swa_evicted_seqlen, evict_threshold)
-if new_swa_evicted_seqlen > req.swa_evicted_seqlen:
-    free_slots = req_to_token_pool.req_to_token[
-        req.req_pool_idx, req.swa_evicted_seqlen : new_swa_evicted_seqlen
-    ]
-    token_to_kv_pool_allocator.free_swa(free_slots)
-    req.swa_evicted_seqlen = new_swa_evicted_seqlen
-```
-
-关键设计点：`swa_evicted_seqlen` 是惰性推进——每步 decode/extend 时才检查是否需要滚窗，窗口超出量一次释放。`evict_threshold = pre_len - max(sliding_window_size, page_size)`（L97），取 `max(sliding_window_size, page_size)` 确保至少保留一页 SWA KV 在树里作为非 tombstone 节点，防止多轮对话场景下的 SWA 内存泄漏（与 `swa_radix_cache.py` 的 `_insert_helper` case 3 联动，注释见 L88-91）。
-
-`maybe_evict_swa`（`schedule_batch.py:2864`）在 batch 级控制触发：decode 模式下记录 `swa_maintenance_step` 按 `SGLANG_SWA_EVICTION_INTERVAL`（默认 1）控制频率，避免每步都查；overlap 模式下 req 的 `decode_batch_idx>=1` 才触发（确保前一个 extend batch 已完成）。同时有一个优化路径 `SGLANG_OPT_SWA_RELEASE_LEAF_LOCK_AFTER_WINDOW`：decode 位置滑出窗口后把 SWA 部分的树锁降级（`dec_swa_lock_only` (`schedule_batch.py:2899`)），让 SWA evictable 叶子可在 LRU 压力下被回收。
+- **GLM-5.2 不使用 SWA**：config.json 无 `sliding_window` 字段（文档 L2773/L2836 已确认），`free_swa_out_of_window_slots`（common.py:69）/`maybe_evict_swa`（schedule_batch.py:2864）等 SWA 窗口外过期机制**不适用**于 GLM-5.2。GLM-5.2 的 KV 量控制由 DSA 稀疏 attention（`index_topk=2048`）完成，非窗口裁剪。本节聚焦 DSA 的索引一致性。
 
 - **DSA 无效 Token KV 主动释放**
 
-DSA 稀疏注意力会在 sparse 层只保留部分"有效 token"的 KV（由 Top-K 路由选择），其余 token 对该层无注意力贡献。这对淘汰的影响是：DSA 的 `index_k_with_scale_buffer` 按页存索引 K+scale，evict 时不仅要释放 latent `kv_buffer` 的页，还要释放对应索引页——`move_kv_cache`（`memory_pool.py:3098`）与 `get_cpu_copy`（L3184）的锁步搬迁/卸载已保障这一点。SGLang 目前的淘汰按 `TreeNode.value` 的 slot 段粒度进行（一段对应整页），DSA 下的正确性要求是：**被淘汰的页同时在 kv_buffer 和 index_k_with_scale_buffer 两层里被一致释放**——`DSATokenToKVPool` 继承 MLA 的 `kv_buffer`（第 1 章）并在 `_clear_buffers` 中同时删除两个 buffer（L3094-3096），但单 token 粒度的淘汰精准性有赖于调度层按 page 对齐处理。
+DSA 稀疏注意力在 sparse 层 attention 时**只读** Top-K 路由选中的 token 的 KV（其余 token 不参与该层 attention），但所有 token 的 latent 仍**完整存于** kv_buffer（见 5.7），并非只存 Top-K。这对淘汰的影响是：DSA 的 `index_k_with_scale_buffer` 按页存索引 K+scale，evict 时不仅要释放 latent `kv_buffer` 的页，还要释放对应索引页——`move_kv_cache`（`memory_pool.py:3098`）与 `get_cpu_copy`（L3184）的锁步搬迁/卸载已保障这一点。SGLang 目前的淘汰按 `TreeNode.value` 的 slot 段粒度进行（一段对应整页），DSA 下的正确性要求是：**被淘汰的页同时在 kv_buffer 和 index_k_with_scale_buffer 两层里被一致释放**——`DSATokenToKVPool` 继承 MLA 的 `kv_buffer`（第 1 章）并在 `_clear_buffers` 中同时删除两个 buffer（L3094-3096），但单 token 粒度的淘汰精准性有赖于调度层按 page 对齐处理。
 
 GLM-5.2 的适配方向：DSA 稀疏层按 `index_topk=2048` 选择历史 token，只有 Top-K 选中的 token 参与 attention。淘汰策略应优先逐出"不在当前 Top-K 集内"的 token KV——但 SGLang 的 `evict` 按 `TreeNode.value` 的 slot 段为最小粒度（一段对应整页），单 token 精度的稀疏感知淘汰需要调度层配合。现有基础设施已支撑——`DSATokenToKVPool.move_kv_cache` 的锁步搬迁保证 latent + index 的一致性释放。
 
