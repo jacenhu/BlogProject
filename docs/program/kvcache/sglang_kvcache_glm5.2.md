@@ -4101,7 +4101,7 @@ def release_kv_cache(req, tree_cache, is_insert=True):
 
 1. **请求级 lock 保证正在使用的 KV 不被逐出**：`cache_unfinished_req`（第 2 章 2.6 末尾）中的 `dec_lock_ref(req.last_node)` → `inc_lock_ref(new_last_node)` 确保请求的活跃节点永远 `lock_ref>0`→在 `_update_leaf_status` 的 L794 分支被跳过→不进 `evictable_leaves`→不被 evict。
 
-2. **host_ref_counter 保证后台传输不读脏数据**：HiCache 的 write-through 异步线程把 KV 从 GPU 写到 L2/L3，整个过程节点的主机引用 `host_ref_counter>0`（`TreeNode.protect_host()` / `release_host()`，L259/263）。`host_ref_counter>0` 虽然不阻止 evict，但 HiCache 的 `cache_controller` 在 write-through 期间持有 `host_value` 的所有权，后台流不完成不释放——这就是第 4 章 4.4 的"并发安全：异步传输与同步淘汰不互撞"。
+2. **host_ref_counter 保证后台传输不读脏数据**：HiCache 的 write-through 异步线程把 KV 从 GPU 写到 L2/L3，整个过程节点的主机引用 `host_ref_counter>0`（`TreeNode.protect_host()` / `release_host()`，L253/257）。`host_ref_counter>0` 虽然不阻止 evict，但 HiCache 的 `cache_controller` 在 write-through 期间持有 `host_value` 的所有权，后台流不完成不释放——这就是第 4 章 4.4 的"并发安全：异步传输与同步淘汰不互撞"。
 
 3. **radix_tree_node ref 和 allocator slot ref 的双向独立**：`TreeNode.lock_ref` 管的是"这个节点代表的 token 序列是否被引用"，管不了物理 slot 的分配。两者通过 `evict` 方法桥接：`lock_ref` 归零 → 节点进 `evictable_leaves` → 淘汰压力下 `evict` 调用 `allocator.free(x.value)` 归还 slot。"引用的粒度"是 token 序列段，"分配/释放的粒度"是物理 slot——两个系统通过节点 value 对 slot 的持有权串联。
 
@@ -4109,17 +4109,17 @@ def release_kv_cache(req, tree_cache, is_insert=True):
 
 一次 evict 操作（`radix_cache.py:563`）的后置：
 
-1. **树分支修剪**：`_delete_leaf`（L782）把节点从 `parent.children` 中摘除，`evictable_size_ -= len(node.key)`，并从 `evictable_leaves` 移除。若父节点因所有子节点被逐出而变"空壳"，在 `evict` 的 loop 中被推回堆继续逐出（L588-590）——实现"失效分支整条回收"。
+1. **树分支修剪**：`_delete_leaf`（定义 L777，evict 内调用 L581）把节点从 `parent.children` 中摘除，`evictable_size_ -= len(node.key)`，并从 `evictable_leaves` 移除。若父节点因所有子节点被逐出而变"空壳"，在 `evict` 的 loop 中被推回堆继续逐出（L588-590）——实现"失效分支整条回收"。
 
-2. **slot 归还**：`self.token_to_kv_pool_allocator.free(x.value)`（L584）是逐出落地的物理操作——这行代码把 `TreeNode.value` 储存的 slot 索引段还给 `free_pages` tensor（或 `release_pages` 延迟队列），`num_evicted += len(x.value)` 计数。物理层 `KVCache` 完全无感——它只管张量布局，不知道 slot 已经"可用"。
+2. **slot 归还**：`self.token_to_kv_pool_allocator.free(x.value)`（L579）是逐出落地的物理操作——这行代码把 `TreeNode.value` 储存的 slot 索引段还给 `free_pages` tensor（或 `release_pages` 延迟队列），`num_evicted += len(x.value)` 计数。物理层 `KVCache` 完全无感——它只管张量布局，不知道 slot 已经"可用"。
 
 3. **`req_to_token` 索引刷新**：被逐出的节点所对应的 token KV 已经无效，但**页表的首部（prefix match 部分的 slot 索引来自该节点 `value`）不会被自动清零**。这是因为调度器在每个新的 forward 前会重新 `match_prefix`——新版匹配结果会覆盖页表。若节点被逐出后请求还没重新匹配，旧 slot 索引残留在页表里意味着请求读到 stale slot 的脏数据——调度器必须保证在逐出后任何引用该节点 slot 的请求已重新走 `match_prefix→write_cache_indices` 流，或在逐出前把请求的 `last_node` 移到 `root_node`。
 
 4. **HiCache 下沉传输标记**：`HiRadixCache` 的淘汰策略可选"先落盘再逐出"——`HiCacheController` 在淘汰前检查 `TreeNode` 是否有可落盘的 `host_value` 或应写回的存储后端标记。`write_through_pending_id` 追踪在途写穿操作；`cache_controller` 的 `PrefetchTimeoutConfig`（第 10 章 10.4）控制后台下沉的超时策略，超时则放弃落盘直接 evict。
 
-5. **事件记录**：`self._record_remove_event(x)`（L592）记录淘汰事件，供 metrics 和 debug trace 用（KVCacheEventMixin 提供）。
+5. **事件记录**：`self._record_remove_event(x)`（L587）记录淘汰事件，供 metrics 和 debug trace 用（KVCacheEventMixin 提供）。
 
-总结链路：释放操作按粒度从细到粗依次是"free_swa_out_of_window_slot 逐 token 释放窗口外 → evict 按节点段逐出 → release_kv_cache 整请求回收 → cache reset 全清"。RC 双层保护（请求 lock + host 后台上锁）和延迟释放排序让这条链路在并发运行时保持 KV 不脏、不丢、不泄漏。
+总结链路：释放操作按粒度从细到粗依次是"free_swa_out_of_window_slot 逐 token 释放窗口外（GLM-5.2 不用 SWA，此环节不适用） → evict 按节点段逐出 → release_kv_cache 整请求回收 → cache reset 全清"。RC 双层保护（请求 lock + host 后台上锁）和延迟释放排序让这条链路在并发运行时保持 KV 不脏、不丢、不泄漏。
 
 
 
