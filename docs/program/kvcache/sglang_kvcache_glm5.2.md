@@ -4070,8 +4070,6 @@ VIP 请求（`priority=100`）的前缀路径上所有节点都被"拉高"到 10
 
 DSA 稀疏注意力在 sparse 层 attention 时**只读** Top-K 路由选中的 token 的 KV（其余 token 不参与该层 attention），但所有 token 的 latent 仍**完整存于** kv_buffer（见 5.7），并非只存 Top-K。这对淘汰的影响是：DSA 的 `index_k_with_scale_buffer` 按页存索引 K+scale，evict 时不仅要释放 latent `kv_buffer` 的页，还要释放对应索引页——`move_kv_cache`（`memory_pool.py:3098`）与 `get_cpu_copy`（L3184）的锁步搬迁/卸载已保障这一点。SGLang 目前的淘汰按 `TreeNode.value` 的 slot 段粒度进行（一段对应整页），DSA 下的正确性要求是：**被淘汰的页同时在 kv_buffer 和 index_k_with_scale_buffer 两层里被一致释放**——`DSATokenToKVPool` 继承 MLA 的 `kv_buffer`（第 1 章）并在 `_clear_buffers` 中同时删除两个 buffer（L3094-3096），但单 token 粒度的淘汰精准性有赖于调度层按 page 对齐处理。
 
-GLM-5.2 的适配方向：DSA 稀疏层按 `index_topk=2048` 选择历史 token，只有 Top-K 选中的 token 参与 attention。淘汰策略应优先逐出"不在当前 Top-K 集内"的 token KV——但 SGLang 的 `evict` 按 `TreeNode.value` 的 slot 段为最小粒度（一段对应整页），单 token 精度的稀疏感知淘汰需要调度层配合。现有基础设施已支撑——`DSATokenToKVPool.move_kv_cache` 的锁步搬迁保证 latent + index 的一致性释放。
-
 ### 6.4 细粒度 slot 回收 vs 粗粒度整会话回收
 
 - **细粒度 slot 回收**：`TokenToKVPoolAllocator.free(free_index)`（第 1 章 1.2.2）按任意 slot 索引集释放，不要求连续、也无需整页。一个请求结束只释放属于它的 slot，其他请求的 slot 毫发无损。RadixCache 淘汰也按节点 `value` 的 slot 段为单位，一段对应一次 `free(x.value)`。
@@ -4092,6 +4090,20 @@ def release_kv_cache(req, tree_cache, is_insert=True):
 ```
 
 链路分三步：①已确认 KV 交给树（插入带走所有权，重复部分释放）；②over-allocate 部分（投机解码拒绝的 draft token 对应 slot）由 `pop_overallocated_kv_cache` 读出并 free；③`ReqToTokenPool.free` 归还页表行号。三步覆盖了"请求的 committed + draft + 页表"三重资源，保证请求结束后不泄漏任何 slot/行号。
+
+**`release_kv_cache` 回收的具体资源**（common.py:635-689）：
+
+| 资源 | 处理 | 代码 | 说明 |
+|------|------|------|------|
+| committed KV | **转移**到 RadixCache | L649 `cache_finished_req` | 插树供复用（非释放，后续 evict 才释放；内部去重/未对齐尾部释放） |
+| over-allocate slot | **释放**回 free_pages | L679 `allocator.free` | 投机解码拒绝的 draft / strip_thinking 的 slot |
+| req_pool_idx | **释放**回 req_to_token_pool | L689 `req_to_token_pool.free` | 页表行号 |
+| mamba 状态 | **释放**（Mamba） | L687 `free_mamba_cache` | GLM-5.2 非 Mamba，跳过 |
+
+**关键区分：转移 vs 释放**：
+- **committed KV 转树**：所有权转移（请求 -> 树），KV 仍在显存供复用，直到 evict 才真正释放
+- **over-allocate slot 释放**：真正释放回 free_pages，可立即重分配
+- **req_pool_idx 归还**：页表行号释放，可立即重分配给新请求
 
 - **SessionRadixCache 的多轮回收**：`SessionRadixCacheMixin`（`session_radix_cache.py:23`）在 `cache_finished_req` 中通过 `_tag_session_leaf` 将会话级叶子挂钩 `req.session_id`，超时或被 `_discard_session_leaf` 清理，但不立即淘汰——它只是**标记**，实际 evict 仍由显存压力触发。
 
