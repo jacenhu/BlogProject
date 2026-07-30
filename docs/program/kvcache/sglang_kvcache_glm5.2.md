@@ -5197,6 +5197,59 @@ PD 分离式传输与 HiCache 下沉共享 L2/L3 通道。`StorageMedium` 标记
 | 初始化路由 | `model_executor/model_runner_kv_cache_mixin.py` | `_init_pools` 按模型类型选 pool 类 | — |
 | Pool 组装 | `model_executor/pool_configurator.py` | 按 config 将各层分配到正确的 KVCache 子类 | — |
 
+### 11.6 mem_cache 模块对外接口
+
+mem_cache 无 `__init__.py`，外部直接 import 子模块。核心接口按层次：
+
+**1. 物理 KV 池（memory_pool.py）**：
+- `ReqToTokenPool`：`alloc(reqs)`, `free(req)`, `req_to_token`（页表 tensor）
+- `KVCache`（基类）：`get_key_buffer`, `get_value_buffer`, `get_kv_buffer`, `set_kv_buffer`, `move_kv_cache`, `get_cpu_copy`, `load_cpu_copy`, `get_contiguous_buf_infos`
+- `MLATokenToKVPool`：`set_mla_kv_buffer`, `get_key_buffer`, `get_value_buffer`, `get_mla_kv_buffer`
+- `DSATokenToKVPool`：`get_index_k_with_scale_buffer`, `set_index_k_scale_buffer`, `move_kv_cache`（锁步）, `get_cpu_copy`
+
+**2. 前缀缓存（radix_cache.py / base_prefix_cache.py）**：
+- `RadixCache` / `BasePrefixCache`：`match_prefix`, `insert`, `evict`, `inc_lock_ref`, `dec_lock_ref`, `cache_finished_req`, `cache_unfinished_req`
+- `HiRadixCache`：继承，`evict` 覆写（软阈值 swap）
+- `ChunkCache`：分块前缀缓存（chunked prefill）
+
+**3. 分配层（allocator/）**：
+- `PagedTokenToKVPoolAllocator`：`alloc(need_size)`, `free(free_index)`, `clear`（管理 `free_pages`）
+- `TokenToKVPoolAllocator`：非分页 slot 级 `alloc`/`free`
+
+**4. 通用操作（common.py）-- 调度层入口**：
+- `alloc_for_extend`（prefill 分配）、`alloc_for_decode`（decode 分配）
+- `release_kv_cache`（请求结束回收）、`evict_from_tree_cache`（淘汰触发）、`alloc_token_slots`（通用分配）
+
+**5. 淘汰策略（evict_policy.py + utils.py）**：
+- `EvictionStrategy`（ABC）+ `LRUStrategy`/`LFUStrategy`/`SLRUStrategy`/`FIFOStrategy`/`MRUStrategy`/`FILOStrategy`/`PriorityStrategy`
+- `get_eviction_strategy(name)`（utils.py 按名实例化）
+
+**6. 创建/注册（registry.py / kv_cache_builder.py）**：
+- `build_kv_cache`（创建 KV 池 + allocator + tree_cache）
+- `default_radix_cache_factory`（按 config 选 RadixCache/HiRadixCache/ChunkCache/SWARadixCache/MambaRadixCache 等）
+
+**7. HiCache / Session / 其他**：
+- `HiRadixCache`（L1 GPU -> L2 CPU -> L3 存储多级）、`HiCacheController`、`hicache_storage`（L3 后端）
+- `SessionRadixCacheMixin`（会话级复用，多轮对话）
+- `flush_cache`（刷缓存，disagg 切换）、`events`（KV cache 事件 metrics/trace）
+
+**外部调用关系**：
+```
+scheduler / tp_worker:
+  build_kv_cache(registry) -> 创建 tree_cache + kv_pool + allocator
+  alloc_for_extend / alloc_for_decode(common) -> 分配 KV（内部 evict_from_tree_cache）
+  release_kv_cache(common) -> 请求结束回收
+  tree_cache.match_prefix / insert / evict / inc_lock_ref(RadixCache)
+
+attention backend:
+  token_to_kv_pool.get_key_buffer / set_mla_kv_buffer(物理池) -> 读写 KV
+  req_to_token_pool.req_to_token(页表) -> 查 slot
+
+DSATokenToKVPool:
+  get_index_k_with_scale_buffer -> indexer 打分
+  move_kv_cache -> 推测解码锁步搬迁
+```
+
 ## 附录
 
 ### A.1 传统原版 PagedAttention 原理回顾
