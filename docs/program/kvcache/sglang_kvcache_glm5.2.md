@@ -97,6 +97,16 @@ SGLang 相较于 vLLM 最大架构革新是 **RadixTree（基数树）全局前�
     - [11.3 跨设备传输](#113-跨设备传输)
     - [11.4 Attention Backend 中的 paged KV 转换](#114-attention-backend-中的-paged-kv-转换)
     - [11.5 调度入口与工具函数](#115-调度入口与工具函数)
+- [第12章 KV Cache 工程师知识地图](#第12章-kv-cache-工程师知识地图)
+    - [12.1 内存模型：两层表与两种布局](#121-内存模型两层表与两种布局)
+    - [12.2 Radix Cache 前缀复用](#122-radix-cache-前缀复用)
+    - [12.3 分配器与调度集成](#123-分配器与调度集成)
+    - [12.4 多模型结构的 KV 池](#124-多模型结构的-kv-池)
+    - [12.5 底层 Kernel 与 Attention 后端](#125-底层-kernel-与-attention-后端)
+    - [12.6 分级存储与分布式传输](#126-分级存储与分布式传输)
+    - [12.7 工程素养与调试](#127-工程素养与调试)
+    - [12.8 上手路径与实践](#128-上手路径与实践)
+    - [12.9 推测解码(EAGLE)对 KV 的特殊约束](#129-推测解码eagle对-kv-的特殊约束)
 - [附录](#附录)
     - [A.1 传统原版 PagedAttention 原理回顾](#a1-传统原版-pagedattention-原理回顾)
     - [A.2 `KVCache` 子类全景参考](#a2-kvcache-子类全景参考)
@@ -3968,6 +3978,49 @@ attention:   读 2048 token 的 latent                ← 不是 2048×64 = 1310
 
 DSA 的强稀疏性（0.2%）来自 **per-token topk**--若按 page 选只有 13%。`index_k_with_scale_buffer` 按 page(64)存储 + dsa_indexer.py:824 `assert page_size==64` + kv_cache view [num_pages,64,...] 容易让人误以为 score 也 per-page，但 score 实际 per-token，page=64 只是 K 的存储/计算组织粒度。
 
+### 5.7.10 层间数据流:attention output 不是下层 K
+
+**常见误解**:上一层 attention 计算出来的 output 是下一层的 K。
+
+**实际不是**。上一层 attention output `o` 是中间结果,经**残差(x+o)+ MLP** 变成新的 hidden state `x'`,`x'` 才是下一层输入。下一层的 K = `x' @ W_K_next`(从新的 hidden state 投影)。
+
+**一层的数据流**:
+```
+输入 x(上一层输出 / embedding)
+  ├─ attention: Q=x@W_Q, K=x@W_K, V=x@W_V; o = softmax(Q×K^T)×V
+  ├─ 残差: x' = x + o
+  ├─ MLP: y = down(SiLU(gate(x')) * up(x'))
+  └─ 残差: x'' = x' + y  -> 本层输出 -> 下一层输入
+```
+
+**下一层的 K**:
+```
+下一层输入 x_next = x''(上层输出)
+K_next = x_next @ W_K_next   # 从 x_next 投影,不是直接用上层 attention output o
+```
+
+**完整层间流(78 层)**:
+```
+embedding x0
+  layer 0: x1 = x0 + attn0(x0) + mlp0(...)   # K0 = x0 @ W_K0
+  layer 1: x2 = x1 + attn1(x1) + mlp1(...)   # K1 = x1 @ W_K1
+  ...
+  layer 77: x78 = ...                         # K77 = x77 @ W_K77
+  -> lm_head -> logits
+```
+
+**为什么不是直接当 K**:
+1. K 从 hidden state 投影(每层 K = hidden @ W_K),attention output 是中间结果非 hidden state
+2. 残差连接:attention output 加到 x(残差)+ MLP -> 新 hidden state
+3. 逐层深化:每层 attention+MLP 变换 hidden state,若直接用 attention output 当 K 就跳过了残差+MLP
+
+**关键区分**:
+- **hidden state**(x):逐层 refined(每层加 attention 上下文 + MLP 变换)
+- **attention output**(o):中间结果,加到 hidden state(残差)后被吸收
+- 下一层从**新的 hidden state** 投影 K,不是拿上层"查询结果"当 K
+
+**一句话总结**:上一层 attention output `o` 经残差(x+o)+ MLP -> 新 hidden state `x''`,下层 K = `x'' @ W_K_next`,不是直接用 `o`。
+
 ## 第6章 KV Cache 淘汰与内存回收机制
 
 淘汰（eviction）是"把树缓存中不再需要或优先级最低的 KV 前缀逐出、将其物理 slot 归还给 allocator"的系统级反压机制。不是每个请求结束时才回收——那叫"释放"（release）。淘汰发生在显存不足时才触发，是 SGLang 保证长服务永远不 OOM 的关键。
@@ -5249,6 +5302,268 @@ DSATokenToKVPool:
   get_index_k_with_scale_buffer -> indexer 打分
   move_kv_cache -> 推测解码锁步搬迁
 ```
+
+## 第12章 KV Cache 工程师知识地图
+
+前面 11 章按"机制"组织（数据结构 → 生命周期 → 淘汰 → 传输 → 端到端链路）。本章换一个视角，按 **"一个 KV Cache 工程师需要掌握的知识域"** 重新组织，每个知识域都对应前面的章节与源码路径，可作为入行 roadmap 和能力自检清单。
+
+KV Cache 工程师的工作本质上是**在四层之间保持一致**：调度器（什么时候给谁分配/释放）→ 分配器与缓存树（slot 怎么记账）→ 物理池（数据按什么布局存放）→ Attention kernel（按什么索引读出来）。任何一层改动都可能把不一致传导到另外三层。
+
+### 12.1 内存模型：两层表与两种布局
+
+**地基：KV Cache 不是一块连续 buffer，而是两张表 + 一套记账字段。**
+
+**1. `ReqToTokenPool`：请求级逻辑映射池（页表）**
+
+`ReqToTokenPool`（`memory_pool.py`）维护 `req_to_token` 张量 `[num_reqs, max_context_len]`，第 `i` 行记录请求 `req_pool_idx` 的第 `i` 个 token 的 KV 存于哪个 slot。这是 PagedAttention"KV 是散页、靠页表找"的核心。
+
+```
+req_pool_idx=0: [slot_17, slot_18, slot_35, slot_36, ...]   ← 每 token 一个 slot 索引
+req_pool_idx=1: [slot_99, slot_100, ...]
+```
+
+工程师必须精确区分一组"长度"字段，它们决定显存视图：
+
+- `kv_committed_len`：已被本次 forward 真实计算并写入的 token 数；
+- `kv_allocated_len`：已从物理池分配、可能尚未写入的 token 数（overlap 调度下两者不同步）；
+- `seq_len` / `extend_range`：调度层的逻辑长度，与物理分配解耦。
+
+**2. `TokenToKVPool`：物理显存池**
+
+按模型结构分多个池子（`MHATokenToKVPool` / `MLATokenToKVPool` / `DSATokenToKVPool` / `MambaPool`），每个池子自己管理 K/V buffer 的形状（`[num_layers, num_heads, head_dim, num_tokens]` 或 MLA 的 latent 布局）。
+
+**3. 两种 Layout：token-major vs page-major**
+
+- **token-major**：连续 token 的 KV 在显存中连续，attention kernel 索引简单，但每个请求必须整段连续，无法按页复用；
+- **page-major**：token 按固定 page 存放（`page_major.py`），decode 时每请求一页一页追加，kernel 通过页表 gather。代价是每个 token 要额外算一次页偏移。
+
+**必须掌握**：page size 的物理约束（对齐、CUDA graph 静态形状、DSA 强制 64）、`kv_committed_len` 与 `kv_allocated_len` 在 overlap/PP/DP 三种模式下的更新时机。对应第 1 章 1.1–1.4 与第 11 章 11.1。
+
+### 12.2 Radix Cache 前缀复用
+
+这是 SGLang 区别于 vLLM 的核心，也是 KV cache 工程师最容易出并发 bug 的地方。对应第 2 章与第 6 章。
+
+**1. 树结构与节点操作**
+
+- 每个 `TreeNode` 存一段连续 token 的 KV 引用；match 落到段中间时节点要 **split**，新 token 到达时节点要 **insert**，驱逐时要 **修剪子树**；
+- 树操作必须维持不变量：父节点 token 段 + 子节点 token 段 = 前缀链，任何节点移动都不能破坏其他节点的 `prefix_indices` 指向。
+
+**2. 匹配与隔离**
+
+- `match_prefix` 返回最长公共前缀的 slot 序列 + `last_node`，并按 `page_size` 对齐（`radix_cache.py:355`）；
+- `extra_key`（LoRA id / cache salt）把逻辑命名空间隔离，相同 token 不同 extra_key 绝不共享节点——设计新缓存场景时先想清楚隔离键。
+
+**3. 引用计数联动**
+
+- `inc_lock_ref` / `dec_lock_ref`：请求进 batch 时锁定匹配节点，防止执行期间被驱逐；`host_ref_counter` 是 HiCache 场景下 host 侧持有引用；
+- 双层 RC 防误删是第 6 章 6.5 的核心，也是"驱逐器与调度器并发"的正确性防线。**面试/复盘必考**：为什么 `evict` 不能回收 `lock_ref > 0` 的节点。
+
+**4. 驱逐策略**
+
+`evict_policy.py` 提供 LRU / LFU / SLRU / FIFO / MRU / FILO / Priority。工程师要能回答：
+
+- SLRU 为什么对"共享前缀 + 高频复用"的工作负载更优（probation/protected 两段）；
+- 驱逐一个节点后，它子节点、锁引用、KV slot 的释放顺序是什么（对应第 6 章 6.6）；
+- HiCache 场景下驱逐不是释放而是 **下沉传输**（L1→L2→L3），`evict` 的返回值语义随之改变。
+
+**5. 写入路径**
+
+`cache_finished_req`（请求结束整段入树）与 `cache_unfinished_req`（chunked prefill 中途入树）、Session / COW 语义。树和内存池之间通过 `req_to_token` 引用 slot，**树插入不做数据拷贝，只是把 slot 索引登记进树**——这是"零拷贝前缀缓存"的本质。
+
+### 12.3 分配器与调度集成
+
+调度器通过 allocator 与缓存树打交道，`PrefillAdder` 是两者之间的翻译层（`schedule_policy.py:433`）。对应第 1 章 1.5、第 3 章与第 8 章 8.5。
+
+**1. 预算模型**
+
+```
+rem_total_tokens = available_size() + evictable_size() - rem_total_token_offset
+rem_total_token_offset = Σ (max_new_tokens - len(output_ids)) × new_token_ratio
+```
+
+`new_token_ratio`（实际生成 / max_new_tokens 的估计值）是"既不过度预留、又不 OOM"的旋钮，由 `NewTokenRatioTracker` 动态维护。工程师要能回答：为什么不用 `max_new_tokens` 全额预留（答案：绝大多数请求用不满，全额预留会浪费一半以上显存）。
+
+**2. 分配/释放接口**
+
+- `alloc_for_extend`（prefill 按 extend 长度分配）、`alloc_for_decode`（decode 每步分配）、`release_kv_cache`（请求结束回收）；
+- allocator 内部维护 `free_pages` / `free_slots` 与"被树引用不可回收"的记账；
+- 分配失败时的三种兜底：`retract_decode`（踢回队列）、chunked prefill 切块、priority 抢占（`preempt_to_schedule`）——**这些"内存不够怎么办"的策略本质都是 KV cache 工程师的职责**。
+
+**3. 调度器字段**
+
+`running_batch.batch_is_full`、`chunked_req`、`max_prefill_tokens` / `max_prefill_bs` 都直接决定 KV 分配节奏。改分配策略前，先理清这些字段在 overlap / PP / DP 模式下的传播路径。
+
+**4. 回收与淘汰的触发语义**
+
+- `evict` 是**按需触发**的（`alloc` 时 `available < needed` 才驱逐，不是定时任务）——理解这一点才能解释为什么空闲时显存占用不会自动下降；
+- `release_kv_cache`（请求结束回收）实际做三件事：KV 转存 radix 树、释放 over-allocate 的冗余页、归还页表行号，三步顺序不能乱；
+- `move` vs `free`：搬迁（推测解码槽位整理、PP 传输、HiCache 下沉）**不释放内存**，只有 `free` 才归还 slot——两者语义混淆是显存泄漏的常见来源；
+- `ForwardMode` 完整集合是 EXTEND / DECODE / MIXED / IDLE：MIXED 指 decode 与 chunked prefill 混批，IDLE 是空转轮，调度器依据它决定分配路径与 overlap 策略。
+
+### 12.4 多模型结构的 KV 池
+
+SGLang 的 mem_cache 是**模型结构驱动**的，不是一个万能池。对应第 8 章。
+
+**前置基础**（不掌握这些，池子代码读不懂）：
+
+- Transformer 数据流：attention output 经残差 + MLP 才到下层 hidden state，**不是直接当下一层 K**——这保证了"KV 独立于 hidden state 缓存"是安全的；
+- Q/K/V 生成：embedding → W_QA / W_KV 投影 → norm → RoPE → 量化，每一步都影响 cache 的维度与 dtype；
+- 自回归两阶段：prefill 并行 + causal mask、decode 逐 token；KV cache 的存在本质就是"K/V 生成独立于 attention 依赖"（第 5 章 5.7.6）；
+- MoE（GLM-5.2：256 专家 Top-8）只影响 FFN 显存、不改变 KV 布局，但决定 EP 下 KV 是否要随专家路由跨卡。
+
+| 模型结构 | 池子 | "cache 什么" |
+|---|---|---|
+| MHA | `MHATokenToKVPool` | 每 token 每层存 K/V 两份 |
+| MLA | `MLATokenToKVPool` | 低秩压缩 latent + 解耦 RoPE 部分（维度小 ~10 倍） |
+| Mamba/SSM | `MambaPool` | 隐状态（每请求独占槽位，不是每 token 一页） |
+| MHA+Mamba 混合 | `HybridReqToTokenPool` | 两种分配并存 |
+| DSA/GLM-5.2 | `DSATokenToKVPool` | latent + indexer 索引 K（21 full 层写数据） |
+
+**必须掌握的两个工程主题**：
+
+1. **MLA 为什么能省 10 倍**：K/V 先压缩成低秩 latent 再进缓存，attention 时现场解压。工程含义是"cache 的维度"由模型结构决定，`kv_lora_rank` / `qk_rope_head_dim` 改一个数，整个池子的显存估算和 kernel 都要跟着改；
+2. **统一内存池**（`unified_memory_pool.py`）：把 MHA 与 Mamba 的池子合并成一个字节预算，甚至允许结构间互相侵占——这是"给 A 结构省下的显存能不能给 B 结构用"的工程取舍，涉及 `mamba_slot_full_token_cost` 这类共享 gap 的精确记账。
+
+GLM-5.2 场景额外要懂 DSA：`index_k` 只打分、latent 才算 attention，两套独立投影、两层不同粒度的 KV 管理（详见第 5 章 5.7 系列）。
+
+**3. MLA / DSA 物理池的工程细节**：
+
+- `MLATokenToKVPool`：kv_buffer 存 576 维 latent（512 kv_lora_rank + 64 qk_rope_head_dim），`set_mla_kv_buffer` 有 bf16 / fp8 / e4m3 三条写入路径；
+- `DSATokenToKVPool`：`index_k_with_scale_buffer` 形状 `[num_pages, 8448]`，K 区与 scale 区分开存储，`move_kv_cache` 需锁步搬迁；
+- 显存估算用 `cell_size`（每 token 字节数）：MLA 44928 + DSA 10296 = 55224（`pool_configurator.py:175`），改一个结构参数就要全量重算。
+
+### 12.5 底层 Kernel 与 Attention 后端
+
+分配的 KV 最终要被 attention kernel 消费。对应第 5 章与第 11 章 11.4。
+
+**1. 索引机制**
+
+```
+ForwardBatch: out_cache_loc(本步新 KV slot) + seq_lens + req_pool_indices
+Attention backend: req_to_token[req_pool_idx] → paged_kv_indices → kernel gather
+```
+
+`IndicesUpdater`（Triton kernel）把页表转成 FlashInfer 的 `paged_kv_indices`；DSA 后端则直接在 `init_forward_metadata` 内联构建 2D `page_table`。**每个后端对 KV layout 的要求不同，新 layout 要同时改 pool、allocator、调度元数据和 kernel 四层。**
+
+**2. 后端全景**
+
+`layers/attention/` 下有 FlashInfer / FlashAttention(FA3) / Triton / FlashMLA / CUTLASS MLA / DSA / DeepSeek V4 专用后端等。要理解：
+
+- decode 为什么用 page-major + CUDA graph（静态形状、低 launch 开销）；
+- prefill 为什么用 flatten batch + 变长偏移数组；
+- FP4 / FP8 量化 KV 池（`store_dtype=uint8`）的数值对齐与 scale 管理。
+
+**3. 硬技能**：能读写 Triton、懂 CUDA memory hierarchy（L2 命中、bank conflict）、会 NSight Compute 看 kernel 瓶颈。这是知识域里"纯工程"浓度最高的一块，短时间补不齐，靠项目积累。
+
+**4. CUDA Graph 与 KV 的交互**
+
+- decode 用 CUDA Graph 捕获/重放时，batch 形状必须静态，padding 请求占用 slot 0；
+- `_paged_kv_indices_buf` 这类索引 buffer 在捕获期间固定地址，KV 页表更新只能"改内容、不能改形状"；
+- 结论：CUDA Graph 把"可变 batch"变成"固定上限 batch + 动态 slot"，KV 分配必须配合预留，否则捕获后的索引更新会越界。
+
+**5. 量化 KV 的存储与 dtype**
+
+- FP8 按块量化（`quant_block_size=128`，每块一个 scale）；FP4 用 NVFP4 格式；
+- `store_dtype`（物理存储，如 uint8）与 `dtype`（计算精度，如 bf16/fp8）是两回事，量化池通过 view 零拷贝完成转换；
+- 新量化格式 = 新 pool 变体 + 新 kernel 读路径 + 精度回归测试，三件套缺一不可。
+
+**6. 性能优化清单**
+
+- 内存局部性：page 64 组织的目的是 coalesced load，kernel 里避免按 token 散点 gather；
+- kernel 融合：`fused_store_index_k_cache` 把 index_k 写缓存与 scale 写合并成一次写；
+- 零拷贝：pool 内部用 view / data_ptr 复用 buffer，热路径避免 `set_kv_buffer` 之外的额外拷贝；
+- MQA（`num_heads_kv=1`）：K/V 只有一组 head，缓存量直接除以头数，是显存优化的第一杠杆。
+
+### 12.6 分级存储与分布式传输
+
+KV 不只活在 GPU 显存里。对应第 7 章与第 10 章。
+
+**1. 三级存储层级**（HiCache）：L1 GPU → L2 host（CPU pinned memory）→ L3 存储后端（`storage/` 下的 LMCloud / Mooncake / NIXL / EIC 等）。
+
+**2. 数据路径与决策**：
+
+- `init_load_back` 把 host/远端 KV 拉回 GPU——拉 token id 重算 vs 拉已算 KV，各自带宽与算力的取舍；
+- PD 分离下 prefill 节点产出的 KV 如何传输到 decode 节点（disagg 链路）；
+- DP attention 下各 rank 独立 KV 池、`need_mlp_sync` 决定同步时机；
+- 冷热判别、预取（`PrefetchOperation`）与"软阈值降级 / 硬阈值强制淘汰"水位线。
+
+工程师要能用带宽数字做决策：PCIe 带宽、NVLink、远端 RDMA 各自适合多大 KV 块、多频繁的迁移。
+
+### 12.7 工程素养与调试
+
+KV cache 是**并发 bug 重灾区**：双重释放、索引错位、显存泄漏，且症状（`CUDA illegal memory access`）往往离根因很远。
+
+**必须掌握的调试技能**：
+
+- 用 `compute-sanitizer` / `cuda-memcheck` 定位越界访问的具体 kernel 与索引；
+- 会读 pool stats / metrics（`available_size`、`evictable_size`、每请求 `cached_tokens`），能画出"显存水位 vs 吞吐"的关系；
+- 熟悉 SGLang 的自检机制（canary 测试、invariant checker），知道怎么给分配器加新不变量；
+- 会用 torch profiler / nsys 做调度 CPU 侧与 kernel 的时序分析；
+- 理解 CUDA graph 的静态形状约束如何限制 batch 大小与 KV 布局。
+
+**性能分析能力**：能区分"瓶颈在分配器碎片、驱逐抖动、还是 kernel 索引开销"，并给出可复现的 benchmark（`benchmark/scheduler/`、`benchmark/kernels/` 提供了现成框架）。
+
+**具体调试工具**：
+
+- `maybe_detect_oob`：越界检测，怀疑页表 / 索引越界时先开它；
+- `metrics_collector` + KV cache events（trace）：把 `available_size`、驱逐次数、`layer_transfer_counter`（PP 同步）串成时间线；
+- KV canary 测试：小模型 + 随机扰动，验证"改了布局之后缓存内容仍然一致"。
+
+**代码工程技能**：
+
+- Python：`TYPE_CHECKING` 条件导入、Protocol、dataclass 是 mem_cache 模块的标配写法；
+- PyTorch：fancy indexing、view（零拷贝）、cat 的显存语义——`torch.cat` 会分配新 buffer，热路径里要避免；
+- Triton：`create_flashinfer_kv_indices_triton`、`_set_k_and_s_triton_kernel`、`fp8_paged_mqa_logits` 三个 kernel 覆盖"页表转换 / KV 写入 / 量化读取"三条典型路径；
+- 并发：scheduler 是单线程事件循环，worker 是进程池，跨进程共享的 KV 元数据必须走 IPC，不能直接传对象。
+
+### 12.8 上手路径与实践
+
+**推荐阅读顺序**（由底向上、层层递进）：
+
+1. `memory_pool.py`：MHA 池 + `ReqToTokenPool`——理解数据布局与记账字段；
+2. `radix_cache.py`：树结构、match/insert/evict、引用计数——理解前缀复用；
+3. `allocator/paged.py` + `schedule_policy.py` 的 `PrefillAdder`——理解预算与准入；
+4. `layers/attention/` 选一个后端，看 PagedAttention 怎么消费这些结构；
+5. 最后回到 `scheduler.py` 的 `get_next_batch_to_run`，把前三层串起来。
+
+**两个检验"是否真懂"的实践练习**：
+
+- **给 `evict_policy.py` 新增一个驱逐策略**：会同时触及树、引用计数、调度器预算和 HiCache 下沉路径；
+- **为某类模型新增一种 KV layout**：会同时改物理池、allocator、调度元数据与 attention kernel，完整走一遍四层链路。
+
+**GLM-5.2 专项**：在此基础上再补三块——`DSATokenToKVPool` 的 indexer KV 生命周期、MLA latent 的低秩缓存与解压、FP4 量化 KV 的精度管理，即可覆盖 GLM-5.2/DSA 类模型的完整适配工作。
+
+**知识体系图**（把本章压缩成一页）：
+
+```
+LLM 基础(Transformer 数据流 / QKV 生成 / 自回归 / MLA / DSA / MoE)
+   │
+   ▼
+KV Cache 机制(为什么需要 / prefill vs decode / 显存估算)
+   │
+   ▼
+三层架构(ReqToTokenPool -> Allocator -> KVCache)
+   │
+   ├─ 12.1 内存模型(两层表 / 两种 layout / 记账字段)
+   ├─ 12.2 Radix Cache(match / insert / 驱逐 / 引用计数)
+   ├─ 12.3 分配器与调度(预算 / retract / chunked / MIXED)
+   ├─ 12.4 多模型池(MHA / MLA / DSA / Mamba / 统一池)
+   ├─ 12.5 Kernel 与后端(CUDA Graph / 量化 / 性能)
+   ├─ 12.6 分级存储与分布式(L1/L2/L3 / PD / DP)
+   ├─ 12.7 工程与调试(sanitizer / metrics / canary)
+   └─ 12.9 推测解码(EAGLE / move_kv_cache / bigram)
+```
+
+**核心一句话**：理解 KV 的**全生命周期**——生成 → 存储 → 共享 → 淘汰 → 跨设备流转，并且每一环都能对应到本仓库的具体类与函数。
+
+### 12.9 推测解码(EAGLE)对 KV 的特殊约束
+
+推测解码是 KV cache 工程里最容易"开箱即崩"的场景，因为每步每个请求的 token 数不再是严格一增一减：
+
+- **draft 阶段会多算**：draft token 的 KV 也要占 slot，被 verify 拒绝的 draft 必须通过 `pop_overallocated_kv_cache` 精确释放，漏一个都是显存泄漏；
+- **槽位整理需要锁步**：被接受的 draft token，其 KV 要从 draft 位置挪到正式位置，`move_kv_cache` 必须与 attention 索引更新同一步完成，否则读到错位 KV；
+- **over-allocate 预留**：`alloc_reserve_per_decode` 按 `max(verify 步数, draft 数)` 预留，验证后再回收多余部分，与普通 decode 的"每步 1 slot"路径不同；
+- **bigram key**：EAGLE 的缓存按 bigram 视角组织（`is_bigram`），radix key 与索引都要做 `maybe_to_bigram_view` 转换——前缀匹配与普通解码不在同一命名空间。
 
 ## 附录
 
