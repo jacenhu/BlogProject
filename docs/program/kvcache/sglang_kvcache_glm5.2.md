@@ -4317,7 +4317,41 @@ def alloc_extend_swa_tail(self, prefix_lens, seq_lens, last_loc, extend_num_toke
 
 传输量对比：VL 模型 prefill 1000 token → 全量传输需要 1000 token 的 KV；SWA 窗口 4096 时，只传输尾部 ~1000 token（若 extend 少于窗口则全传）。节省的传输量与 `extend_num_tokens - sliding_window_size` 成正比。对于长 prompt（如 10K token），节省可达 60%+ (仅传最后 4K)。
 
-### 7.4 HiCache 层级传输：HostKVCache ↔ Storage Backend
+### 7.3.4 decode 节点 prefix_indices 语义:L1/total 与本地 match
+
+**prefix_indices 指向 decode 节点本地 kv_buffer 的 slot**(RadixCache match 命中的复用前缀 KV),**不是 prefill 节点的 slot**。decode 节点有独立 KV 池,prefix_indices 是 decode 本地 match 命中的复用前缀。
+
+**机制**(decode.py:881-896):
+```python
+if disaggregation_decode_enable_radix_cache:
+    prefix_match = self._match_prefix_and_lock(req)  # decode 本地树 match
+    prefix_indices = prefix_match.prefix_indices      # decode 本地命中 slot
+    prefix_len = prefix_match.l1_prefix_len           # L1(GPU)已有
+    total_prefix_len = prefix_match.decode_prefix_len # L1+L2+L3 全部
+else:
+    prefix_indices = None  # 不启用 radix,全部 prefill 传输
+```
+
+**prefix_len vs total_prefix_len(L1/L2/L3)**:
+- `prefix_len`(L1):**GPU 上已有**的 token 数(device-resident,prefix_indices 已指向)
+- `total_prefix_len`(L1+L2+L3):**承诺给 prefill 的完整前缀**(含 L2 host hit + L3 storage hit)
+- `[prefix_len, total_prefix_len)` gap:由 **HiCache loadback** 后续填充(从 CPU/存储加载到 GPU)
+
+**写入页表**(`_pre_alloc` decode.py:1340):
+```python
+req_to_token_pool.write((req.req_pool_idx, slice(0, prefix_len)), prefix_indices)
+```
+decode 节点页表前缀部分(0:prefix_len)指向本地命中 slot。
+
+**三种情况**:
+
+| 场景 | prefix_indices | 说明 |
+|------|----------------|------|
+| decode 启用 radix + L1 命中 | decode 本地 slot | 复用 decode 已有 KV(共享前缀,省传输) |
+| decode 启用 radix + L2/L3 命中 | 部分本地 + HiCache loadback | L1 命中指向本地,gap 由 loadback 填 |
+| decode 不启用 radix | None | 全部从 prefill 传输(`load_kv_cache`) |
+
+**与 prefill 传输的关系**:decode 能复用的前缀**不传**(本地有),只传未命中部分(`load_kv_cache` 写入新 slot,或 HiCache loadback 从 L2/L3 回灌 L1)。这减少 PD 传输量--若 decode 节点已有共享前缀(如系统提示),只需传差异部分。
 
 ### 7.4 HiCache 层级传输：HostKVCache ↔ Storage Backend
 
