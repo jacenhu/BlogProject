@@ -174,7 +174,7 @@ class ReqToTokenPool:
         self.free_slots = list(range(1, self._alloc_size))
 ```
 
-只有四个实例属性：
+共有六个实例属性（含 `_alloc_size`、`device`）：
 
 | 属性 | 类型 | 含义 |
 |---|---|---|
@@ -482,7 +482,7 @@ class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
         self.release_pages = torch.empty((0,), dtype=torch.int64, device=device)
 ```
 
-**PagedTokenToKVPoolAllocator**（page_size>1，allocator/paged.py:105）的 free_pages 初始化类似但按 page：`num_pages = size // page_size`（paged.py:125），`clear()` 里 `free_pages = arange(1, num_pages+1)`（paged.py:276）。**size 来源**：`PagedTokenToKVPoolAllocator(size=self.max_total_num_tokens * self.dcp_size, page_size=self.page_size * self.dcp_size, kvcache=self.token_to_kv_pool, ...)`（model_runner_kv_cache_mixin.py:1141-1148）--由 **model_runner 创建并传 size**，**不是 DSATokenToKVPool 赋值**。DSATokenToKVPool（`token_to_kv_pool`，size=max_total_num_tokens，L855-856）和 allocator 共享同一个 `max_total_num_tokens`（model_runner 属性），`allocator.kvcache` 引用 DSATokenToKVPool（物理 buffer），但 free_pages 由 allocator.clear() 自己初始化。职责分离：DSATokenToKVPool 管物理 buffer（kv_buffer/index_k），allocator 管 page 分配（free_pages）。
+**PagedTokenToKVPoolAllocator**（page_size>1，allocator/paged.py:105）的 free_pages 初始化类似但按 page：`num_pages = size // page_size`（paged.py:125），`clear()` 里 `free_pages = arange(1, num_pages+1)`（paged.py:277（clear 定义，free_pages 赋值在 :279））。**size 来源**：`PagedTokenToKVPoolAllocator(size=self.max_total_num_tokens * self.dcp_size, page_size=self.page_size * self.dcp_size, kvcache=self.token_to_kv_pool, ...)`（model_runner_kv_cache_mixin.py:1141-1148）--由 **model_runner 创建并传 size**，**不是 DSATokenToKVPool 赋值**。DSATokenToKVPool（`token_to_kv_pool`，size=max_total_num_tokens，L855-856）和 allocator 共享同一个 `max_total_num_tokens`（model_runner 属性），`allocator.kvcache` 引用 DSATokenToKVPool（物理 buffer），但 free_pages 由 allocator.clear() 自己初始化。职责分离：DSATokenToKVPool 管物理 buffer（kv_buffer/index_k），allocator 管 page 分配（free_pages）。
 
 两个 GPU tensor：
 
@@ -884,7 +884,7 @@ FP8 DSA 量化 (kv_cache_dim = 656, dtype = uint8):
 └──────────────────────────────────────────────────────────┘
 ```
 
-对 128 头 × 128 维的模型，MHA 每 token 存 `128×128×2(K+V)`；MLA 只存 `576`，约 **57× 压缩**。
+对 128 头 × 128 维的模型，MHA 每 token 存 `128×128×2(K+V)`；MLA 只存 `576`，约 **57× 压缩（DeepSeek-V2 128 head；GLM-5.2 64 head 约 28×，配置相关）**。
 
 **物理 vs 逻辑**——只有一个 tensor，通过切片对外暴露 key/value（L2701-2718）：
 
@@ -938,7 +938,7 @@ cache_k_rope  = tensor([[[0.45, -0.67, ...]],     # (3, 1, 64) bf16, K_rope（�
 
 # 目标物理池
 kv_buffer[layer_id]: shape (100064, 1, 576) dtype=bfloat16
-#                     [token数, head=1, kv_cache_dim=576]
+#                     [token数, head=1, kv_cache_dim=576(bf16,即512+64;fp8 DSA 为656)]
 ```
 
 Triton kernel 把 `cache_k_nope` 和 `cache_k_rope` **拼接**后 scatter 写入 `kv_buffer[loc]`：
@@ -1343,7 +1343,7 @@ DSA 索引部分同理：估算用 `128+4 = 132`，实际也是 `132`（这部�
 
 调度器调 `pool.set_kv_buffer(layer, loc, k, v)` 写入；attention backend 调 `pool.get_key_buffer(layer_id)` 读出。中间由 `loc`（槽位索引）解耦——这种分层让同一套前缀缓存逻辑能复用于 MHA/MLA/DSA 三种截然不同的物理布局。
 
-**一句话总结**：三个类是 KV cache 的"显存布局器"——MHA 存全量多头 K/V，MLA 把多头压成单 latent（57× 省显存），DSA 在 MLA 之上再加一份打包的 fp8 索引页支撑稀疏 Top-K 路由；三者都靠 `loc` 槽位索引与上层解耦，靠多出的 `page_size` padding slot 0 兜底 dummy 写入。
+**一句话总结**：三个类是 KV cache 的"显存布局器"——MHA 存全量多头 K/V，MLA 把多头压成单 latent（57× 省显存，DeepSeek-V2；GLM-5.2 64 head 约 28×，配置相关），DSA 在 MLA 之上再加一份打包的 fp8 索引页支撑稀疏 Top-K 路由；三者都靠 `loc` 槽位索引与上层解耦，靠多出的 `page_size` padding slot 0 兜底 dummy 写入。
 
 #### 1.2.4 三层解耦优势：逻辑请求自由伸缩、物理显存统一池化
 
@@ -1522,7 +1522,7 @@ def create_flashinfer_kv_indices_triton(
 
 ### 1.4 KV Cache 精细化元数据体系
 
-`Req` 对象（`schedule_batch.py:700`）承载了请求级 KV 管理的全部元数据，按功能分为四个维度。每个字段在 Prefill/Decode/释放/淘汰四个阶段被不同模块读写，构成 SGLang 请求状态机。
+`Req` 对象（`schedule_batch.py:666`）承载了请求级 KV 管理的全部元数据，按功能分为四个维度。每个字段在 Prefill/Decode/释放/淘汰四个阶段被不同模块读写，构成 SGLang 请求状态机。
 
 - 1.4.1 请求维度：`kv_committed_len`、`kv_allocated_len`、`req_pool_idx`、`priority`、`time_stats`
 
@@ -1591,7 +1591,7 @@ def create_flashinfer_kv_indices_triton(
 | `kv_overallocated_freed`（L741） | 悬空 KV 是否已释放 | `pop_overallocated_kv_cache` 同理；spec decode 路径允许 committed < allocated，非 spec 路径断言二者相等（L677） |
 | `inflight_middle_chunks`（L871） | chunked prefill 中的未完成 chunk 数 | 每新增一个 chunk +1，每处理完成一个 chunk -1；调度器据此判断"该请求还有未完成的 chunk，不能释放页表行" |
 | `is_retracted` / `retracted_stain`（L874-876） | 请求是否被 retract（回退）/ 是否曾被 retract | retract 时把已分配但未确认的 decode slot 释放，`retracted_stain` 标记历史上被 retract 过，影响 scheduling priority |
-| `extend_batch_idx` / `decode_batch_idx`（L754-755） | 当前 batch 中的索引 | overlap scheduler 用 `decode_batch_idx >= 1` 判断 decode 是否已脱离 extend 阶段，决定何时可以 evict SWA（`maybe_evict_swa` (`schedule_batch.py:2864`)）
+| `extend_batch_idx` / `decode_batch_idx`（L759-760） | 当前 batch 中的索引 | overlap scheduler 用 `decode_batch_idx >= 1` 判断 decode 是否已脱离 extend 阶段，决定何时可以 evict SWA（`maybe_evict_swa` (`schedule_batch.py:2870`)）
 
 ### 1.5 Chunked Prefill：长文本分段与 `req_pool_idx` 复用机制
 
@@ -1817,7 +1817,7 @@ is_bigram=True:  token_ids = [A, B, C, D, E]  ← 相同 5 个 raw token → 4 �
 
 - 2.3.5 `last_access_time` / `hit_count` / `priority`：淘汰决策元数据
 
-三者都是 `EvictionStrategy` 的输入：`last_access_time`（LRU/MRU 用）、`hit_count`（LFU/SLRU 用）、`priority`（PriorityStrategy 用，`_insert_helper` 里沿路径 `max` 传播 L723）。`__lt__`（L282）按 `last_access_time` 排序，供 `heapq` 优先队列。
+三者都是 `EvictionStrategy` 的输入：`last_access_time`（LRU/MRU 用）、`hit_count`（LFU/SLRU 用）、`priority`（PriorityStrategy 用，`_insert_helper` 里沿路径 `max` 传播 L718）。`__lt__`（L276）按 `last_access_time` 排序，供 `heapq` 优先队列。
 
 - 2.3.6 `hash_value` / `write_through_pending_id` / `creation_time`
 
@@ -2343,7 +2343,7 @@ decode 的页表写入是**追加**：`locs = seq_lens_gpu`（当前已确认长
 `KVCache` 三类物理池在 `__init__` 阶段通过 `_create_buffers` 一次性分配满 `size + page_size` 个槽位（`memory_pool.py:1450`）：
 
 ```python
-# MHATokenToKVPool._create_buffers (L1488)
+# MHATokenToKVPool._create_buffers 3D 布局 (L1516-1523)
 self.k_buffer = [
     torch.zeros((self.size + self.page_size, self.head_num, self.head_dim),
                  dtype=self.store_dtype, device=self.device)
@@ -2351,7 +2351,7 @@ self.k_buffer = [
 ]
 ```
 
-`memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE)`（L1216）套一层，在 memory saver 启用时为这批 `torch.zeros` 分配特定显存池分块。分配后的 `k_buffer`/`v_buffer`/`kv_buffer` 张量在整个服务生命周期中不动——**永远不 grow、不 shrink、不 realloc**。
+`memory_saver_adapter.region(GPU_MEMORY_TYPE_KV_CACHE)`（L1451，在 `_create_buffers` 内）套一层，在 memory saver 启用时为这批 `torch.zeros` 分配特定显存池分块。分配后的 `k_buffer`/`v_buffer`/`kv_buffer` 张量在整个服务生命周期中不动——**永远不 grow、不 shrink、不 realloc**。
 
 **请求级惰性**：
 
@@ -2416,7 +2416,7 @@ self.head_num = swa_head_num if swa_head_num is not None else head_num
 # head_num 是本地头数 = num_attention_heads // tp_size
 ```
 
-`FlashInferIndicesUpdaterDecode.__init__`（`flashinfer_backend.py:1144`）同步调整：
+`FlashInferIndicesUpdaterDecode.__init__`（`flashinfer_backend.py:1290`）同步调整：
 
 ```python
 self.num_qo_heads = model_runner.model_config.num_attention_heads // get_parallel().attn_tp_size
@@ -2621,7 +2621,7 @@ def unwrap_write_loc(loc_info):
 
 - 4.1.2 CUDA kernel 直接写入 Block 显存，张量视图复用，无 `clone/copy`
 
-`MHATokenToKVPool.set_kv_buffer`（`memory_pool.py:1687`）的写入不做任何数据拷贝中间体，而是直接把 `cache_k`/`cache_v` 写进 `k_buffer[layer_id - start_layer][loc]` 的现有显存视图。三条路径：
+`MHATokenToKVPool.set_kv_buffer`（`memory_pool.py:1673`）的写入不做任何数据拷贝中间体，而是直接把 `cache_k`/`cache_v` 写进 `k_buffer[layer_id - start_layer][loc]` 的现有显存视图。三条路径：
 
 ```python
 def set_kv_buffer(self, layer, loc_info, cache_k, cache_v, k_scale=None, ...):
@@ -2718,7 +2718,7 @@ set_kv_buffer(new_layer, old_slot, new_k, new_v) → 覆盖旧 KV
 
 **SWA 窗口截断写入（环形窗口）**：
 
-Hybrid SWA 模型下 full 池和 SWA 池各有一套 slot 空间。`maybe_evict_swa`（`schedule_batch.py:2864`）在每步 decode/extend 前释放窗口外 SWA slot：
+Hybrid SWA 模型下 full 池和 SWA 池各有一套 slot 空间。`maybe_evict_swa`（`schedule_batch.py:2870`）在每步 decode/extend 前释放窗口外 SWA slot：
 
 ```python
 # common.py:69 free_swa_out_of_window_slots
@@ -2896,7 +2896,7 @@ def set_kv_buffer_prefix_valid(self, layer, loc_2d, commit_lens, cache_k, cache_
 
 **DSA 稀疏写入——GLM-5.2 实际场景**：
 
-GLM-5.2 不使用 SWA。KV 写入的控制由 DSA 的 `index_topk_pattern`/`index_topk_freq`（config 字段）决定：`dsa_layer_skips_topk`（model_config.py:180）按 `pattern[layer_id]=="S"` 或 `freq` 取模判断，`skip_topk=False` 的 21 个 full 层跑 `self.indexer` 生成并写入 `index_k_with_scale_buffer` + 算 topk_indices；`skip_topk=True` 的 57 个 shared 层不跑 indexer（checkpoint 无 indexer 权重），经 `prev_topk_indices` 层间传递（deepseek_v2.py:2601）复用 full 层的 topk_indices，**不写不读 index_k**（forward_mla.py:200 注释："shared layers' cache is never read, filling it is dead work"）。索引写入走标准 DSA 路径：
+GLM-5.2 不使用 SWA。KV 写入的控制由 DSA 的 `index_topk_pattern`/`index_topk_freq`（config 字段）决定：`dsa_layer_skips_topk`（configs/model_config.py:180）按 `pattern[layer_id]=="S"` 或 `freq` 取模判断，`skip_topk=False` 的 21 个 full 层跑 `self.indexer` 生成并写入 `index_k_with_scale_buffer` + 算 topk_indices；`skip_topk=True` 的 57 个 shared 层不跑 indexer（checkpoint 无 indexer 权重），经 `prev_topk_indices` 层间传递（deepseek_v2.py:2601）复用 full 层的 topk_indices，**不写不读 index_k**（forward_mla.py:200 注释："shared layers' cache is never read, filling it is dead work"）。索引写入走标准 DSA 路径：
 
 ```python
 class HybridLinearKVPool(KVCache):
@@ -2952,7 +2952,7 @@ Pre-前言：forward metadata 在 `init_forward_metadata`（`flashinfer_backend.
 
 ### 5.2 `IndicesUpdater`：`req_to_token` → flashinfer `paged_kv_indices` 的 Triton 转换 kernel
 
-`FlashInferIndicesUpdaterDecode`（`flashinfer_backend.py:1141`）是 decode 读取的网关。核心字段：
+`FlashInferIndicesUpdaterDecode`（`flashinfer_backend.py:1289`）是 decode 读取的网关。核心字段：
 
 ```python
 self.req_to_token = model_runner.req_to_token_pool.req_to_token  # GPU 页表
@@ -3193,7 +3193,7 @@ TP 下 attention kernel 的读取是**纯本地操作**——不跨 rank 读 KV�
 └────────────────────────────────┘   └────────────────────────────────┘
 ```
 
-`FlashInferIndicesUpdaterDecode.__init__`（`flashinfer_backend.py:1144`）：
+`FlashInferIndicesUpdaterDecode.__init__`（`flashinfer_backend.py:1290`）：
 
 ```python
 self.num_qo_heads = model_runner.model_config.num_attention_heads // get_parallel().attn_tp_size
@@ -3251,7 +3251,7 @@ def capture_one(self, shape_key, forward_fn, dummies=None, post_warmup_hook=None
 
 捕获时 KV 物理池的 `k_buffer`/`v_buffer` 已分配完毕（`_create_buffers` 在模型初始化时完成）。`self._pool` 是 graph 专用的 CUDA memory pool——确保 graph 操作的内存地址在多次 replay 间保持稳定。捕获后 `begin_forward` 被替换为 `fast_decode_plan`（`flashinfer_backend.py:733`）：正常 `begin_forward` 会执行 CPU 端 kernel planning，`fast_decode_plan` 跳过它——因为 graph 已将 kernel 参数固化。
 
-**_paged_kv_indices_buf 固定缓冲区**（`flashinfer_backend.py:860`）：
+**_paged_kv_indices_buf 固定缓冲区**（`flashinfer_backend.py:867`（`init_cuda_graph_state` 在 :860））：
 
 ```python
 cuda_graph_kv_indices = torch.zeros(
@@ -3751,7 +3751,7 @@ hidden state x (6144维)
 ### 5.7.4 每 token 粒度与跨层存储：latent 78 层都存，index_k 只 21 full 层存
 
 **粒度（单层视角，每 token 一份）**：
-- **latent**：每 token 一个 576 维 `[V_nope(512)|K_rope(64)]`。布局 `kv_buffer [num_slots, kv_cache_dim=576]`，每 slot(token)一个。
+- **latent**：每 token 一个 576 维 `[V_nope(512)|K_rope(64)]`。布局 `kv_buffer [num_slots, kv_cache_dim=576(bf16,即512+64;fp8 DSA 为656)]`，每 slot(token)一个。
 - **index_k**：每 token 一个 132 字节(128 fp8 K + 4 scale)。布局每页 8448 = 64×132（dsa_indexer.py:899 `view[num_pages, 64, 1, 132]`），每 page 64 slot，每 slot 132B = **每 token 一个**。
 
 **跨层存储**：
@@ -3771,7 +3771,7 @@ index_k: 21 层 × 132 字节(fp8+scale) = 2,772 字节/token   ← 仅占 laten
 ```
 index_k 每 token 仅占 latent 的 ~3%，是"廉价打分"通道的存储基础。
 
-**shared 层复用原理**：`should_run_indexer`（forward_mla.py:184）按 `skip_topk` 判断--full 层跑 `self.indexer` 算 index_k + topk_indices；shared 层（`skip_topk=True`，checkpoint 无 indexer 权重）复用上一层传来的 `prev_topk_indices`（deepseek_v2.py:2601），不跑 indexer、不写不读 index_k（注释 forward_mla.py:200："shared layers' cache is never read, filling it is dead work"）。`skip_topk` 由 `dsa_layer_skips_topk(config, layer_id)`（model_config.py:180）按 `index_topk_pattern`/`index_topk_freq` 决定。
+**shared 层复用原理**：`should_run_indexer`（forward_mla.py:184）按 `skip_topk` 判断--full 层跑 `self.indexer` 算 index_k + topk_indices；shared 层（`skip_topk=True`，checkpoint 无 indexer 权重）复用上一层传来的 `prev_topk_indices`（deepseek_v2.py:2601），不跑 indexer、不写不读 index_k（注释 forward_mla.py:200："shared layers' cache is never read, filling it is dead work"）。`skip_topk` 由 `dsa_layer_skips_topk(config, layer_id)`（configs/model_config.py:180）按 `index_topk_pattern`/`index_topk_freq` 决定。
 
 **indexer 权重命名与哪些层有**：indexer 构造 `prefix=add_prefix("indexer", prefix)`（deepseek_v2.py:1671），权重在 checkpoint 命名 `model.layers.{i}.self_attn.indexer.{wq_b,wk,wk_weights_proj,weights_proj,k_norm}.weight`。**只 21 个 full 层的权重文件有 indexer 权重**，57 个 shared 层的 checkpoint **没有**（forward_mla.py:190 注释："shared layers carry no indexer weights in the checkpoint"）。代码虽每层 `self.indexer = Indexer(...)`（deepseek_v2.py:1658 无条件创建），但 shared 层 `skip_topk=True` 不跑 indexer（权重未加载也不用）、复用 `prev_topk_indices`，省下 57 层的 indexer 权重存储。
 
@@ -4107,7 +4107,7 @@ class SLRUStrategy(EvictionStrategy):
 **Priority 策略的路径传播**：
 
 ```python
-# _insert_helper L723
+# _insert_helper L718（priority max 传播）
 node.priority = max(node.priority, priority)  # 沿路径取 max
 ```
 
@@ -4117,7 +4117,7 @@ VIP 请求（`priority=100`）的前缀路径上所有节点都被"拉高"到 10
 
 ### 6.3 [GLM-5.2 适配] DSA 稀疏 KV 管理：索引一致性与淘汰策略
 
-- **GLM-5.2 不使用 SWA**：config.json 无 `sliding_window` 字段（文档 L2773/L2836 已确认），`free_swa_out_of_window_slots`（common.py:69）/`maybe_evict_swa`（schedule_batch.py:2864）等 SWA 窗口外过期机制**不适用**于 GLM-5.2。GLM-5.2 的 KV 量控制由 DSA 稀疏 attention（`index_topk=2048`）完成，非窗口裁剪。本节聚焦 DSA 的索引一致性。
+- **GLM-5.2 不使用 SWA**：config.json 无 `sliding_window` 字段（文档 L2773/L2836 已确认），`free_swa_out_of_window_slots`（common.py:69）/`maybe_evict_swa`（schedule_batch.py:2870）等 SWA 窗口外过期机制**不适用**于 GLM-5.2。GLM-5.2 的 KV 量控制由 DSA 稀疏 attention（`index_topk=2048`）完成，非窗口裁剪。本节聚焦 DSA 的索引一致性。
 
 - **DSA 无效 Token KV 主动释放**
 
@@ -4199,9 +4199,9 @@ def release_kv_cache(req, tree_cache, is_insert=True):
 
 单个请求的 KV 从 GPU 搬移到 CPU 内存，对应 `KVCache.get_cpu_copy()` / `load_cpu_copy()`（`memory_pool.py:1602/1624`）。用于两个场景：（1）`TorchMemorySaverAdapter` 的显存压缩——请求排队期间暂时 offload 到 CPU 释放 GPU 压力；（2）PD 分离式 decode 端的 KV 暂存——prefill 生成后把 KV 卸载到 CPU，decode 端按需加载。
 
-- 7.1.2 Prefill→Decode 分离式传输（Disaggregation PD）：NCCL / NIXL 跨节点
+- 7.1.2 Prefill→Decode 分离式传输（Disaggregation PD）：mooncake / NIXL 跨节点
 
-prefill 节点生成 KV → 传输给 decode 节点消费。核心在 `python/sglang/srt/disaggregation/` 目录。传输路径有三种：NCCL AllReduce/AllGather（同机多卡）、NIXL（跨机点对点）、mooncake RDMA（跨机零拷贝）。`DecodeReqToTokenPool` 为传输预分配 slot 缓存。
+prefill 节点生成 KV → 传输给 decode 节点消费。核心在 `python/sglang/srt/disaggregation/` 目录。传输后端：mooncake（RDMA 零拷贝）、NIXL（跨机点对点）、ascend/mori 等（base/conn.py 抽象基类，无 NCCL 后端）。`DecodeReqToTokenPool` 为传输预分配 slot 缓存。
 
 - 7.1.3 HiCache 层级传输：HostKVCache ↔ Storage Backend 的后台数据流转
 
@@ -4226,7 +4226,7 @@ L2（HostKVCache）↔ L3（Storage Backend）的优先级升降级与后台上�
 
 ### 7.3 Disaggregation PD 传输链路
 
-**定位**：PD（Prefill-Decode）分离式部署将推理拆为两个阶段——prefill 节点负责长 prompt 的批量预填充，算完的 KV 经网络传输到 decode 节点，decode 节点只做逐 token 生成。核心代码在 `python/sglang/srt/disaggregation/`。整个传输链路涉及三类组件：**池层**（`DecodeReqToTokenPool` 预分配）、**传输层**（NCCL/NIXL/mooncake）、**序列化层**（`kv_cache_builder.py`）。
+**定位**：PD（Prefill-Decode）分离式部署将推理拆为两个阶段——prefill 节点负责长 prompt 的批量预填充，算完的 KV 经网络传输到 decode 节点，decode 节点只做逐 token 生成。核心代码在 `python/sglang/srt/disaggregation/`。整个传输链路涉及三类组件：**池层**（`DecodeReqToTokenPool` 预分配）、**传输层**（mooncake/NIXL/ascend/mori，base/conn.py 抽象基类）、**序列化层**（`kv_cache_builder.py`）。
 
 - 7.3.1 `DecodeReqToTokenPool`：预分配 slot + 传输 slot 的分离池设计
 
@@ -4247,19 +4247,21 @@ class DecodeReqToTokenPool:
 
 `alloc` 方法与普通 `ReqToTokenPool` 的关键差异：chunked prefill 复用检测更严格——`assert len(reusing) <= 1`（每个 batch 最多一个 chunked 请求复用行号）。其它逻辑与普通池相同（从 `free_slots` 切行号、`free` 归还）。
 
-- 7.3.2 NCCL 集合通信 vs NIXL 点对点传输 vs RDMA 零拷贝
+- 7.3.2 传输后端：base/conn.py 抽象基类 + mooncake/nixl/ascend/mori/fake 实现
 
-三种传输路径在 `disaggregation/` 下各有独立的 `conn.py` 实现：
+`base/conn.py` 是抽象基类（`BaseKVSender(ABC)` / `BaseKVReceiver(ABC)`，L105/160），**不是 NCCL 实现**，无 NCCL 后端。实际传输后端：
 
-| 方式 | 文件 | 核心类 | 场景 |
-|---|---|---|---|
-| **NCCL** | `base/conn.py` | `BaseKVSender` / `BaseKVReceiver` | 同机多卡，基于 `torch.distributed` 集合通信 |
-| **NIXL** | `nixl/conn.py` | `NixlKVSender` / `NixlKVReceiver` | 跨机点对点，基于 libfabric，绕过 NCCL 的跨机限制 |
-| **mooncake RDMA** | `mooncake/conn.py` | `MooncakeKVSender` / `MooncakeKVReceiver` | 跨机零拷贝，通过 `custom_mem_pool` 直达 GPU 显存 |
+| 后端 | 文件 | 场景 |
+|---|---|---|
+| **mooncake** | `mooncake/conn.py` | RDMA 零拷贝，跨机，`custom_mem_pool` 直达 GPU 显存 |
+| **nixl** | `nixl/conn.py` | 跨机点对点（默认 UCX，非 libfabric） |
+| **ascend** | `ascend/` | 华为昇腾 |
+| **mori** | `mori/` | MoRI |
+| **fake** | `fake/` | 测试 |
 
-每个 `conn.py` 实现统一的 `KVSender` / `KVReceiver` 接口（`send_kv` / `recv_kv`），上层 `DecodeTransferQueue`（`decode.py:1473`）不感知具体传输协议。`custom_mem_pool`（`memory_pool.py:1228`，由 `SGLANG_MOONCAKE_CUSTOM_MEM_POOL` 环境变量开关）为 mooncake 分配独立的 CUDA memory pool，RDMA 传输直接写入该 pool 的 GPU 显存地址——**绕过了 CPU bounce buffer 和 cudaMemcpy D2H/H2D 往返**。
+每个 `conn.py` 实现统一的 `BaseKVSender` / `BaseKVReceiver` 抽象接口（`init` / `send` / `poll` / `send_metadata` / `abort`），上层 `DecodeTransferQueue`（`decode.py:1473`）不感知具体传输协议。`custom_mem_pool`（`memory_pool.py:1228`，由 `SGLANG_MOONCAKE_CUSTOM_MEM_POOL` 环境变量开关）为 mooncake 分配独立的 CUDA memory pool，RDMA 传输直接写入该 pool 的 GPU 显存地址——**绕过了 CPU bounce buffer 和 cudaMemcpy D2H/H2D 往返**。
 
-mooncake 路径的延迟优势：NCCL 在跨机时先 cudaMemcpy D2H → CPU → socket → H2D（3 次拷贝）；mooncake RDMA 直接从 GPU 显存 RDMA write → 远端 GPU 显存（1 次拷贝）。对于 100K token × 32 layers 的 MLA 潜在 KV（~7.4 GB），NCCL 延时 ~1-3 秒，mooncake RDMA 延时 ~10-50ms。
+mooncake RDMA 路径的延迟优势：直接从 GPU 显存 RDMA write -> 远端 GPU 显存（1 次拷贝），绕过 CPU bounce buffer 和 cudaMemcpy D2H/H2D 往返。对于 100K token × 32 layers 的 MLA 潜在 KV（~7.4 GB），mooncake RDMA 延时 ~10-50ms。
 
 - 7.3.3 `kv_cache_builder.py`：KV 数据序列化与反序列化
 
@@ -4289,7 +4291,7 @@ def build_kv_cache(*, server_args, model_config, tp_worker, page_size, ...) -> K
 
 `KVCacheBuildResult`（L12）是命名元组，携带 `req_to_token_pool`、`token_to_kv_pool_allocator`、`tree_cache`、`sliding_window_size`、`full_tokens_per_layer`、`swa_tokens_per_layer`。PD 传输中 `disaggregation/decode.py` 的 `DecodePreallocQueue` 通过 `tp_worker.get_memory_pool()` 获取这些实例，发起传输。
 
-传输时的实际序列化由 `disaggregation/utils.py` 配合完成：KV 的 `data_ptr` + `nbytes` 经 `get_contiguous_buf_infos`（第 1 章 1.2.3）读取各 layer buffer 的指针，直接传给 NCCL/NIXL/mooncake 的 `send/recv`——数据本身不需要序列化（raw bytes in GPU memory），只需要**元数据序列化**（buffer 指针 + 长度 + dtype + layer 信息）。
+传输时的实际序列化由 `disaggregation/utils.py` 配合完成：KV 的 `data_ptr` + `nbytes` 经 `get_contiguous_buf_infos`（第 1 章 1.2.3）读取各 layer buffer 的指针，直接传给 mooncake/NIXL 等后端的 `send`——数据本身不需要序列化（raw bytes in GPU memory），只需要**元数据序列化**（buffer 指针 + 长度 + dtype + layer 信息）。
 
 - 7.3.4 SWA allocator 的 `alloc_extend_swa_tail`：decode 端仅传输 SWA 尾部
 
@@ -4417,7 +4419,7 @@ DSA 的 `DSATokenToKVPool` 在 offload 时独传 `index_k_with_scale_buffer`。�
 | 指标 | MHA (128 头 × 128 维) | MLA (kv_lora_rank=512, rope=64) |
 |---|---|---|
 | 每 token 存储量 | head_num × head_dim × 2 = 32768 元素 | kv_lora_rank + qk_rope = 576 元素 |
-| 压缩比 | — | ~57× |
+| 压缩比 | — | ~57×（V2 128head）/ ~28×（GLM-5.2 64head，配置相关） |
 | 每层 buffer 数 | 2 (K + V) | 1 (latent) |
 | get_value_buffer 返回 | 整 v_buffer | kv_buffer 前半 (nope) |
 | 跨设备传输 | 传 K+V 各层各 chunk | 传单层单 buffer |
@@ -4468,7 +4470,7 @@ KVWriteLoc(loc=virtual_slot, swa_loc=swa_pool_slot, full_loc=full_pool_slot)
 
 `set_kv_buffer` 一次调用，`unwrap_write_loc` 拆出两套 slot，分别写入 full pool 和 SWA pool——两套池、两套 slot、同一次操作。
 
-**读取：flashinfer 双 wrapper**（`flashinfer_backend.py:1212`）：
+**读取：flashinfer 双 wrapper**（`flashinfer_backend.py:1373`）：
 
 ```python
 for wrapper_id in range(2):
@@ -4706,7 +4708,7 @@ x (6144)
 
 ### 8.8 [GLM-5.2 推演] 结合 MLA + DSA + MoE 的综合 KV Cache 架构设计方向
 
-**前置声明**：GLM-5.2 的 `GlmMoeDsaForCausalLM` 架构已在 SGLang `release/v0.5.15` 中注册（`model_config.py:112`），MTP index sharing 等特性已合入。KV 物理池通过 `DSATokenToKVPool` 直接复用，与 DeepSeek-V3.2 共享同一套基础设施。本节基于真实 `config.json`（附录 A.4）进行具体的适配方案分析。
+**前置声明**：GLM-5.2 的 `GlmMoeDsaForCausalLM` 架构已在 SGLang `release/v0.5.15` 中通过 `is_deepseek_dsa` 白名单检测（`configs/model_config.py:112`，实际注册在 `glm4_moe.py:1480`），MTP index sharing 等特性已合入。KV 物理池通过 `DSATokenToKVPool` 直接复用，与 DeepSeek-V3.2 共享同一套基础设施。本节基于真实 `config.json`（附录 A.4）进行具体的适配方案分析。
 
 **GLM-5.2 实际架构（基于真实 `config.json`）**：
 
@@ -4716,7 +4718,7 @@ GLM-5.2 共 **78 层** attention，**全部使用 DSA**（不是 dense/sparse �
 78 层 attention（全部 DSA）:
   │
   ├─ 全部 78 层: MLA latent KV (kv_buffer)
-  │     kv_lora_rank=512, qk_rope_head_dim=64, kv_cache_dim=576
+  │     kv_lora_rank=512, qk_rope_head_dim=64, kv_cache_dim=576(bf16) / 656(fp8 DSA)
   │
   ├─ DSA indexer (index_k_with_scale_buffer):
   │     index_topk_pattern/index_topk_freq 决定哪些层独立维护索引 K:
@@ -4744,17 +4746,17 @@ self.token_to_kv_pool = DSATokenToKVPool(
     qk_rope_head_dim=64,                             # config.qk_rope_head_dim
     layer_num=78,                                    # config.num_hidden_layers
     device=self.device,
-    kv_cache_dim=576,                                # 512 + 64
+    kv_cache_dim=576(bf16) / 656(fp8 DSA),            # bf16: 512+64; fp8: 512+16scale+128rope
     enable_memory_saver=self.server_args.enable_memory_saver,
     start_layer=self.start_layer,                    # PP 分片
     end_layer=self.end_layer,
     index_head_dim=128,                              # config.index_head_dim
 )
 
-# 注意: 由于 indexer_types 中存在 "shared" 层（57 层复用索引），
+# 注意: SGLang 不读 indexer_types，由 dsa_layer_skips_topk(index_topk_freq/index_skip_topk_offset) 判断 shared 层（57 层复用），
 # 实际分配: index_k_with_scale_buffer 按 layer_num=78 分配所有层，
 # 但只有 "full" 的 21 层会被写入索引数据。
-# layer_num 参数不受 indexer_types 影响。
+# layer_num 参数不受影响（SGLang 不读 indexer_types）。
 
 **MLA 与 DSA 结合的具体机制**：
 
@@ -4811,7 +4813,7 @@ def glm52_sparse_layer_forward(hidden_states, positions, layer_id):
 
 | 挑战 | 具体问题 | 现有支撑程度 |
 |---|---|---|
-| **Attention Backend 实现** | DSA backend 已存在于 `layers/attention/dsa/`（`DeepseekSparseAttnBackend`，含 indexer/topk/triton kernel）。GLM-5.2 复用此 backend，仅需配置 `indexer_types` 的 shared 索引复用 | 高。backend 已就绪 |
+| **Attention Backend 实现** | DSA backend 已存在于 `layers/attention/dsa/`（`DeepseekSparseAttnBackend`，含 indexer/topk/triton kernel）。GLM-5.2 复用此 backend，仅需配置 `index_topk_freq`/`index_skip_topk_offset` 的 shared 索引复用（SGLang 不读 `indexer_types`，由 `dsa_layer_skips_topk` 用 freq/offset 判断） | 高。backend 已就绪 |
 | **FP8 量化兼容** | DSA 索引 K 必须用 fp8 存储（`index_k_with_scale_buffer` 的 dtype=uint8），MLA latent 可选用 fp8/bf16。两套精度体系需在同一个 pool 中协调 | 中。DSATokenToKVPool 已支持，但需验证精度 |
 | **Pool 组装复杂度** | 78 层全部使用 DSA attention，仅需一个 `DSATokenToKVPool`，无需 dispatcher。`_init_pools` 标准 DSA 路径直接覆盖 | 低。零新代码 |
 | **RadixTree 兼容性** | Dense 层和 Sparse 层在同一棵树中共享前缀——树节点 value 存的是 Dense 层 slot，Sparse 层需要额外的 index slot 映射 | 高。`DSATokenToKVPool` 已实现 `move_kv_cache` 锁步搬迁 |
@@ -4837,7 +4839,7 @@ SGLang 通过这些字段**自动路由**到 `DSATokenToKVPool`，无需任何�
 ```
 config.architectures=["GlmMoeDsaForCausalLM"]
   │
-  └─→ is_deepseek_dsa(config)                          model_config.py:103-115
+  └─→ is_deepseek_dsa(config)                          configs/model_config.py:103-115
         │  _hf_arch(config) == "GlmMoeDsaForCausalLM"   ← 第 112 行显式注册
         │  and config.index_topk is not None             ← DSA 标记字段
         └─→ True
@@ -4857,16 +4859,16 @@ config.kv_lora_rank=512 (非空)
 
 **GLM-5.2 与 DeepSeek-V3.2 共享同一套 KV 物理池**——两者都在 `is_deepseek_dsa` 的白名单中（分别是 `GlmMoeDsaForCausalLM` 和 `DeepseekV32ForCausalLM`），都走 `DSATokenToKVPool`。GLM-5.2 不需要 SWA 池（config.json 中无 sliding window）、不需要 `MLATokenToKVPool`（所有层都是 DSA 而非纯 MLA）、不需要自定义 dispatcher——`_init_pools` 的标准 DSA 路径（L844-869）直接覆盖。
 
-**`indexer_types` 的 "shared" 层含义**：57 层共享索引不意味着 KV 物理池要特殊处理——`DSATokenToKVPool` 只需为 "full" 的 21 层创建 `index_k_with_scale_buffer`，共享层在 attention kernel 中直接读取同组 full 层的 index buffer。这由 attention backend 的 index lookup 逻辑处理，不改变物理池的 `layer_num` 参数。
+**shared 层含义（由 `index_topk_freq`/`index_skip_topk_offset` 决定，SGLang 不读 `indexer_types`）**：57 层共享索引不意味着 KV 物理池要特殊处理——`DSATokenToKVPool` 只需为 "full" 的 21 层创建 `index_k_with_scale_buffer`，共享层在 attention kernel 中直接读取同组 full 层的 index buffer。这由 attention backend 的 index lookup 逻辑处理，不改变物理池的 `layer_num` 参数。
 
 **已合入 `release/v0.5.15` 的 GLM-5.2 支持**：
-- `GlmMoeDsaForCausalLM` 架构注册（`model_config.py:112`）
+- `GlmMoeDsaForCausalLM` 白名单检测（`configs/model_config.py:112`，注册在 `glm4_moe.py:1480`）
 - MTP index sharing with prefill CP（#30992）
 - MTP IndexShare across PD and CUDA graph replay（#30839）
 - NVFP4 + flashinfer_trtllm long-context fix（#31001）
 - DSA fused top-k v2 for GLM-5.x（#30506）
 
-**一句话**：GLM-5.2 的 KV 物理池**零新增代码**--`DSATokenToKVPool` 直接复用，无自定义 dispatcher、无 SWA 池、无 MLA 池。DSA attention backend 已存在于 `layers/attention/dsa/`（`DeepseekSparseAttnBackend`，含 indexer、topk、triton kernel），GLM-5.2 复用此 backend，仅需按 `indexer_types` 配置 shared 索引复用逻辑。
+**一句话**：GLM-5.2 的 KV 物理池**零新增代码**--`DSATokenToKVPool` 直接复用，无自定义 dispatcher、无 SWA 池、无 MLA 池。DSA attention backend 已存在于 `layers/attention/dsa/`（`DeepseekSparseAttnBackend`，含 indexer、topk、triton kernel），GLM-5.2 复用此 backend，仅需按 `index_topk_freq`/`index_skip_topk_offset` 配置 shared 索引复用逻辑（SGLang 不读 `indexer_types`）。
 
 ## 第9章 SGLang 端到端全推理链路时序闭环
 
@@ -5121,7 +5123,7 @@ DSA 稀疏 Top-K 裁剪:
   所有 78 层: get_index_k_scale_buffer → DSA kernel Top-K(2048)
     → 只有 K=2048 个 token 的 latent KV 参与 attention
     → 效果: Sparse attention 的有效 KV 量恒定为 2048 token
-    → indexer_types 优化: 仅 21 层独立维护索引 K，57 层复用同组索引
+    → index_topk_freq/index_skip_topk_offset 优化（SGLang 不读 indexer_types）: 仅 21 层独立维护索引 K，57 层复用同组索引
 
 MLA latent 压缩:
   所有 78 层: kv_lora_rank=512 压缩 latent KV
@@ -5512,7 +5514,7 @@ Attention backend: req_to_token[req_pool_idx] → paged_kv_indices → kernel ga
 
 KV 不只活在 GPU 显存里。对应第 7 章与第 10 章。
 
-**1. 三级存储层级**（HiCache）：L1 GPU → L2 host（CPU pinned memory）→ L3 存储后端（`storage/` 下的 LMCloud / Mooncake / NIXL / EIC 等）。
+**1. 三级存储层级**（HiCache）：L1 GPU → L2 host（CPU pinned memory）→ L3 存储后端（`storage/` 下的 aibrix_kvcache / eic / file / hf3fs / lmcache / mooncake_store / nixl / simm / umbp 等）。
 
 **2. 数据路径与决策**：
 
@@ -5617,7 +5619,7 @@ SGLang 在 PagedAttention 的物理分页之上构建了 RadixTree 前缀共享�
 | `NoOpMHATokenToKVPool` | `memory_pool.py:1943` | all-SWA 模型的 full sub-pool | 空池，所有 KV 都在 SWA pool |
 | `MHATokenToKVPoolFP4` | `memory_pool.py:2057` | FP4 量化 KV | 写入路径 extra quantize/dequant per-block scale |
 | `HybridLinearKVPool` | `memory_pool.py:2361` | SWA + Dense 混合 | 组合 full_kv_pool + swa_kv_pool，write_loc 双写 |
-| `MLATokenToKVPool` | `memory_pool.py:2610` | DeepSeek-V2/V3 MLA | 单 latent kv_buffer，57× 压缩 |
+| `MLATokenToKVPool` | `memory_pool.py:2610` | DeepSeek-V2/V3 MLA | 单 latent kv_buffer，57×（V2）/ 28×（V3/GLM-5.2）压缩 |
 | `MLATokenToKVPoolFP4` | `memory_pool.py:2869` | FP4 MLA | MLA latent + FP4 量化，set_mla_kv_buffer FP4 特化 |
 | `DSATokenToKVPool` | `memory_pool.py:3009` | DeepSeek-V3.2 DSA | MLA + index_k_with_scale_buffer 双缓冲 |
 | `DeepSeekV4TokenToKVPool` | `deepseek_v4_memory_pool.py:449` | DeepSeek V4 多级压缩 | c4 高压缩 + c128 标准压缩双池 |
@@ -5647,7 +5649,7 @@ SGLang 在 PagedAttention 的物理分页之上构建了 RadixTree 前缀共享�
   "index_head_dim": 128,                  // DSA: 索引 K 的 head dim
   "index_topk": 2048,                     // DSA: 稀疏 Top-K 选择数
   "index_topk_freq": 4,                   // DSA: 索引更新的频率（每 4 层）
-  "index_skip_topk_offset": 3,            // DSA: 前 3 个 token 跳过 Top-K
+  "index_skip_topk_offset": 3,            // DSA: 前 3 层不跳过(始终 topk),从第 3 层起按 freq=4 周期跳过
   "index_share_for_mtp_iteration": true,  // MTP: draft 迭代间共享索引
 
   // === 模型结构 ===
@@ -5679,6 +5681,7 @@ SGLang 在 PagedAttention 的物理分页之上构建了 RadixTree 前缀共享�
     "dense","dense","dense",
     "sparse","sparse","sparse",...],       // 前 3 层 dense + 75 层 sparse (MoE)
 
+  // 注意: SGLang 不读此字段（用 index_topk_freq/index_skip_topk_offset），仅供其他框架
   "indexer_types": [
     "full","full","full",
     "shared","shared","shared",
@@ -5710,13 +5713,13 @@ SGLang 在 PagedAttention 的物理分页之上构建了 RadixTree 前缀共享�
 
 | config.json 字段 | 值 | SGLang 检测位置 | 触发结果 |
 |---|---|---|---|
-| `architectures` | `["GlmMoeDsaForCausalLM"]` | `model_config.py:112` | `is_deepseek_dsa()` → `True` |
-| `index_topk` | `2048` | `model_config.py:114` | DSA 稀疏 Top-K 参数 |
+| `architectures` | `["GlmMoeDsaForCausalLM"]` | `configs/model_config.py:103（is_deepseek_dsa，白名单 :112）` | `is_deepseek_dsa()` → `True` |
+| `index_topk` | `2048` | `configs/model_config.py:175`（`get_dsa_index_topk`）| DSA 稀疏 Top-K 参数 |
 | `kv_lora_rank` | `512` | `model_runner.py:414` | `use_mla_backend` → `True` |
 | `qk_rope_head_dim` | `64` | `model_runner_kv_cache_mixin.py:860` | 传入 `DSATokenToKVPool` |
 | `index_head_dim` | `128` | `model_runner_kv_cache_mixin.py:867` | 传入 `DSATokenToKVPool` |
 | `num_hidden_layers` | `78` | `model_runner_kv_cache_mixin.py:861` | `layer_num=78`（无 PP 时） |
-| `max_position_embeddings` | `1048576` | `model_config.py` | 1M 上下文窗口 |
+| `max_position_embeddings` | `1048576` | `configs/model_config.py` | 1M 上下文窗口 |
 | `n_routed_experts` | `256` | MoE FFN | EP 路由，**不产生 KV** |
 | `first_k_dense_replace` | `3` | 前 3 层为 dense FFN | 与 KV 无关（attention 层统一 DSA） |
 
@@ -5729,29 +5732,29 @@ is_deepseek_dsa()=True && use_mla_backend=True
       size=max_total_num_tokens,
       page_size=64,              // CUDA DSA 强制
       kv_lora_rank=512, qk_rope_head_dim=64,
-      kv_cache_dim=576,          // 512 + 64 (同 MLA)
+      kv_cache_dim=576,          // 512+64(bf16); fp8 DSA:656
       index_head_dim=128,        // DSA 索引 K 维度
       index_topk=2048,           // 每 token 选 2048 个历史 token 做稀疏 attention
       layer_num=78)
 ```
 
-**`indexer_types` 的 KV 含义**：
+**shared 层的 KV 含义（`index_topk_freq`/`index_skip_topk_offset` 决定，SGLang 不读 `indexer_types`）**：
 
 78 层 attention 的索引器分为两种类型：
 - `"full"`：每层独立索引 K（21 层，前3层全full + 每4层一组的第1层）
-- `"shared"`：同组共享上一层的 full 索引 K（57 层，前3层全shared + 每4层一组的第2-4层）
+- `"shared"`：前 3 层 full(0,1,2)后，第 3-5 层 shared(复用第 2 层)+ 每 4 层一组 [full,shared×3] 中的 shared，共 57 层
 
-物理上 `DSATokenToKVPool` 仍按 `layer_num=78` 为所有 78 层分配 `index_k_with_scale_buffer`（`memory_pool.py:3090` 的 `for _ in range(layer_num)`），但只有 `"full"` 的 21 层会被实际写入索引数据。`"shared"` 层的 buffer 虽然分配了但不会被写入，attention kernel 直接读取同组 full 层的 index buffer。`indexer_types` 不改变 `layer_num` 参数。
+物理上 `DSATokenToKVPool` 仍按 `layer_num=78` 为所有 78 层分配 `index_k_with_scale_buffer`（`memory_pool.py:3072-3088` 的 `for _ in range(layer_num)`），但只有 `"full"` 的 21 层会被实际写入索引数据。`"shared"` 层的 buffer 虽然分配了但不会被写入，attention kernel 直接读取同组 full 层的 index buffer。`indexer_types`（SGLang 不读，仅供其他框架）不改变 `layer_num` 参数。
 
 **KV 显存估算**（fp8，max_num_tokens=128K，仅 full index 层）：
 
-- latent KV：`128K × 656 × 78` ≈ **6.25 GB**（所有 78 层，含 fp8 scale）
-- 索引 KV：`128K × 132 × 78` ≈ **1.26 GB**（78 层均分配 buffer，仅 21 层写入数据）
-- 总计 ≈ **7.51 GB**
+- latent KV：`128K × 656 × 78` ≈ **6.25 GiB**（所有 78 层，含 fp8 scale）
+- 索引 KV：`128K × 132 × 78` ≈ **1.26 GiB**（78 层均分配 buffer，仅 21 层写入数据）
+- 总计 ≈ **7.51 GiB**
 
 ### A.5 GLM-5.2 生产部署命令参考
 
-**部署条件**：B300 GPU × 8、FP8 量化、Balanced 模式、单机（SingleNode）。
+**部署条件**：B300 GPU、FP8 量化、Balanced 模式、8 节点 × 8 卡（64 GPU，`--tp 8 --dp 8`）。
 
 ```bash
 sglang serve \
@@ -5776,7 +5779,7 @@ sglang serve \
 | 参数 | 值 | 对 KV Cache 的影响 |
 |---|---|---|
 | `--model-path` | `zai-org/GLM-5.2-FP8` | FP8 量化权重；KV cache 对应使用 fp8 存储（`store_dtype=uint8`） |
-| `--tp 8 --dp 8` | TP=8 × DP=8 = 64 卡 | TP 按 head 切 KV（每 rank 64/8=8 heads），DP 各副本独立 KV 池 |
+| `--tp 8 --dp 8` | TP=8 × DP=8 = 64 卡 | MLA/DSA 单 head latent，TP 按 latent 通道切分（非 MHA 的 head 切分），DP 各副本独立 KV 池 |
 | `--enable-dp-attention` | DP 间 attention 通信 | KV 读取需跨 DP rank 同步 |
 | `--moe-a2a-backend deepep` | DeepEP all-to-all | MoE FFN 路由，**不影响 KV** |
 | `--speculative-algorithm EAGLE` | EAGLE 投机解码 | 每步 draft token 数 = 1×1=1（`topk=1, steps=1`），`alloc_reserve_per_decode=2` |
@@ -5784,4 +5787,3 @@ sglang serve \
 | `--mem-fraction-static 0.85` | 85% 显存给 KV pool | B300 单卡 ~192GB → KV pool ≈ 163 GB |
 | `--chunked-prefill-size 32768` | 32K chunk | 1M 上下文需 ~32 个 chunk，`req_pool_idx` 跨 chunk 复用 |
 | `--max-running-requests 256` | 256 并发 | `req_to_token` 页表 256×1M×4B = 1 GB（仅页表，不含 KV 数据） |
-
