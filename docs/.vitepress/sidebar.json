@@ -211,6 +211,40 @@
       ]
     },
     {
+      "text": "AI Infra 面试",
+      "collapsed": true,
+      "items": [
+        {
+          "text": "导读",
+          "link": "/program/interview/aiinfra_overview"
+        },
+        {
+          "text": "招聘岗位全景",
+          "link": "/program/interview/aiinfra_jobs"
+        },
+        {
+          "text": "KV Cache 核心知识体系",
+          "link": "/program/interview/aiinfra_kvcache_deep_dive"
+        },
+        {
+          "text": "面经与高频考点",
+          "link": "/program/interview/aiinfra_interview_questions"
+        },
+        {
+          "text": "系统设计专题",
+          "link": "/program/interview/aiinfra_system_design"
+        },
+        {
+          "text": "2 个月面试复习计划",
+          "link": "/program/interview/aiinfra_2month_plan"
+        },
+        {
+          "text": "资源汇总",
+          "link": "/program/interview/aiinfra_resources"
+        }
+      ]
+    },
+    {
       "text": "存储",
       "collapsed": true,
       "items": [

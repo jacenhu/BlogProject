@@ -13,7 +13,8 @@ export default defineConfig({
   lastUpdated: true,
   ignoreDeadLinks: 'localhostLinks',
   markdown: {
-    lineNumbers: true
+    lineNumbers: true,
+    math: true
   },
   head: [
     ['meta', { charset: 'utf-8' }],
