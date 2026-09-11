@@ -211,7 +211,7 @@
       ]
     },
     {
-      "text": "AI Infra 面试",
+      "text": "AI Infra 专题",
       "collapsed": true,
       "items": [
         {
@@ -227,7 +227,7 @@
           "link": "/program/interview/aiinfra_kvcache_deep_dive"
         },
         {
-          "text": "面经与高频考点",
+          "text": "技术问题与解析",
           "link": "/program/interview/aiinfra_interview_questions"
         },
         {
@@ -235,7 +235,7 @@
           "link": "/program/interview/aiinfra_system_design"
         },
         {
-          "text": "2 个月面试复习计划",
+          "text": "2 个月学习计划",
           "link": "/program/interview/aiinfra_2month_plan"
         },
         {

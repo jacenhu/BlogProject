@@ -13,7 +13,7 @@ defineProps({ featured: { type: Array, required: true }, topics: { type: Array, 
       </div>
       <a class="reading-feature" href="/program/interview/aiinfra_overview.html">
         <div class="feature-top"><span>AI INFRA / 01</span><span class="feature-icon" aria-hidden="true">↗</span></div>
-        <div><p class="feature-kicker">知识梳理与面试准备</p><h2>KV Cache<br />与推理系统</h2></div>
+        <div><p class="feature-kicker">原理解析与工程实践</p><h2>KV Cache<br />与推理系统</h2></div>
         <p class="feature-description">KV Cache · 推理引擎 · 系统设计</p>
         <div class="feature-bottom">阅读专题导读 <span aria-hidden="true">→</span></div>
       </a>

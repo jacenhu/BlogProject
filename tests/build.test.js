@@ -33,7 +33,7 @@ test('catalog renders every article and preserves heading anchors', async () => 
     .map((path) => `/program/${path.replaceAll('\\', '/').replace(/\.md$/, '')}`)
   assert.deepEqual([...paths].sort(), articles.sort())
   assert.equal((html.match(/<li>/g) || []).length, paths.size)
-  for (const id of ['c', 'llm', 'kv-cache', 'java后端', '论文', 'ai-infra-面试']) {
+  for (const id of ['c', 'llm', 'kv-cache', 'java后端', '论文', 'ai-infra-专题']) {
     assert.ok(html.includes(`id="${id}"`), `Missing heading: ${id}`)
   }
   assert.ok(!html.includes('@catalog'))
