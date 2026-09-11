@@ -3,10 +3,14 @@
   "version": "1.0.0",
   "description": "Jacen's personal blog powered by VitePress",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vitepress dev docs",
     "build": "vitepress build docs && node scripts/optimize-images.js",
-    "preview": "vitepress preview docs"
+    "preview": "vitepress preview docs",
+    "test": "node --test"
   },
   "keywords": [
     "blog",

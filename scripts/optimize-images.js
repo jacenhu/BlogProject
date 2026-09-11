@@ -1,60 +1,56 @@
-import { readdir, stat, rename } from 'fs/promises'
-import { join, extname } from 'path'
+import { readdir, stat, rename, rm } from 'node:fs/promises'
+import { join, extname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
 
-const IMG_DIR = 'docs/.vitepress/dist/img'
+const IMG_DIR = fileURLToPath(new URL('../docs/.vitepress/dist/img', import.meta.url))
 
 async function* walk(dir) {
-  const entries = await readdir(dir, { withFileTypes: true })
-  for (const entry of entries) {
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name)
-    if (entry.isDirectory()) {
-      yield* walk(path)
-    } else {
-      yield path
-    }
+    if (entry.isDirectory()) yield* walk(path)
+    else if (entry.isFile()) yield path
   }
 }
 
-async function optimize() {
+export async function optimizeImages(dir = IMG_DIR) {
   let saved = 0
   let count = 0
 
-  for await (const path of walk(IMG_DIR)) {
+  for await (const path of walk(dir)) {
     const ext = extname(path).toLowerCase()
     if (!['.png', '.jpg', '.jpeg'].includes(ext)) continue
 
     const before = (await stat(path)).size
     const tmpPath = path + '.tmp'
-    const sharpInstance = sharp(path)
-
     try {
+      const image = sharp(path)
       if (ext === '.png') {
-        await sharpInstance
-          .png({ quality: 85, compressionLevel: 9, adaptiveFiltering: true })
-          .toFile(tmpPath)
+        await image.png({ quality: 85, compressionLevel: 9, adaptiveFiltering: true }).toFile(tmpPath)
       } else {
-        await sharpInstance
-          .jpeg({ quality: 82, progressive: true, mozjpeg: true })
-          .toFile(tmpPath)
+        await image.jpeg({ quality: 82, progressive: true, mozjpeg: true }).toFile(tmpPath)
       }
 
-      await rename(tmpPath, path)
-      const after = (await stat(path)).size
-      const delta = before - after
-      saved += delta
+      const after = (await stat(tmpPath)).size
+      if (after < before) {
+        await rename(tmpPath, path)
+        saved += before - after
+      }
       count++
-      console.log(`  ${path}  ${(before / 1024).toFixed(1)}KB → ${(after / 1024).toFixed(1)}KB  ${delta > 0 ? '-' : '+'}${Math.abs(delta / 1024).toFixed(1)}KB`)
-    } catch (err) {
-      console.error(`  ✗ ${path}:`, err.message)
+    } catch (cause) {
+      throw new Error(`Image optimization failed: ${path}`, { cause })
+    } finally {
+      await rm(tmpPath, { force: true })
     }
   }
 
-  if (count > 0) {
-    console.log(`\n✓ Optimized ${count} images, saved ${(saved / 1024 / 1024).toFixed(2)}MB`)
-  } else {
-    console.log('No images to optimize')
-  }
+  console.log(`Optimized ${count} images, saved ${(saved / 1024 / 1024).toFixed(2)}MB`)
+  return { count, saved }
 }
 
-optimize().catch(console.error)
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  optimizeImages(process.argv[2]).catch((error) => {
+    console.error(error)
+    process.exitCode = 1
+  })
+}

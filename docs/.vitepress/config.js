@@ -1,9 +1,7 @@
 import { defineConfig } from 'vitepress'
-import { createRequire } from 'module'
-
-const require = createRequire(import.meta.url)
-const sidebar = require('./sidebar.json')
-const nav = require('./nav.json')
+import sidebar from './sidebar.json'
+import nav from './nav.json'
+import { catalogPlugin } from './catalog.js'
 
 export default defineConfig({
   title: "Jacen's Blog",
@@ -14,7 +12,8 @@ export default defineConfig({
   ignoreDeadLinks: 'localhostLinks',
   markdown: {
     lineNumbers: true,
-    math: true
+    math: true,
+    config: (md) => md.use(catalogPlugin, sidebar['/program/'])
   },
   head: [
     ['meta', { charset: 'utf-8' }],
