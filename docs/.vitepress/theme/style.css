@@ -14,20 +14,12 @@
   --vp-c-border: #d5e0e8;
   --vp-c-divider: #e3ebf0;
   --vp-c-gutter: #e3ebf0;
-  --blog-card-tint: #eeebfb;
-  --blog-card-warm: #fff1e8;
-  --blog-card-cool: #eaf4fd;
-  --blog-feature-shadow: #edf0fa;
   --vp-sidebar-width: 260px;
   --vp-font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --blog-font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
   --vp-font-family-mono: var(--blog-font-mono);
 }
 .dark {
-  --blog-card-tint: #32324b;
-  --blog-card-warm: #41352f;
-  --blog-card-cool: #293d51;
-  --blog-feature-shadow: #293444;
   --vp-c-brand-1: #9ac4ed;
   --vp-c-brand-2: #c4def5;
   --vp-c-brand-3: #739fca;
@@ -47,7 +39,7 @@
 a, button { -webkit-tap-highlight-color: transparent; }
 a:focus-visible, button:focus-visible { outline: 3px solid var(--vp-c-brand-1); outline-offset: 4px; }
 .VPNavBar { border-bottom: 1px solid var(--vp-c-divider); background: var(--vp-c-bg); }
-.VPNavBar .title { font-size: 24px; font-weight: 750; letter-spacing: -.065em; }
+.VPNavBar .title { font-size: 22px; font-weight: 650; letter-spacing: -.04em; }
 .VPNavBarMenuLink, .VPNavBarMenuGroup .button { font-size: 14px; }
 .VPHome { margin-bottom: 0 !important; }
 .VPFooter { border-top: 1px solid var(--vp-c-divider); padding: 26px 24px; }
