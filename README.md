@@ -28,7 +28,7 @@ npm audit      # 检查包含开发依赖在内的安全告警
 | `docs/program/index.md` | 技术首页，`<!-- @catalog -->` 在 Markdown 编译前展开为目录 |
 | `docs/index.md` | 首页文案、专题卡片与精选文章数据 |
 | `docs/.vitepress/nav.json` | 顶部导航 |
-| `docs/.vitepress/theme/components/` | 首页布局、轮播、侧边栏折叠组件及其样式 |
+| `docs/.vitepress/theme/components/` | 首页布局与侧边栏折叠组件及其样式 |
 | `docs/.vitepress/theme/style.css` | 全站主题样式 |
 | `docs/public/` | 原始静态资源，构建不会改写这些文件 |
 
@@ -37,7 +37,7 @@ npm audit      # 检查包含开发依赖在内的安全告警
 目录以普通 Markdown 编译，因此保留页内锚点、右侧大纲和 VitePress 链接检查。
 修改后运行 `npm test` 和 `npm run build`。
 
-首页轮播支持鼠标悬停、键盘焦点暂停以及系统的减少动画设置。
+首页专题全部直接展示，卡片交互支持键盘焦点与系统的减少动画设置。
 侧边栏折叠偏好保存在本地；移动端继续使用 VitePress 自带的目录按钮。
 
 ## 构建与部署

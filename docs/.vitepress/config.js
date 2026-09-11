@@ -26,6 +26,7 @@ export default defineConfig({
     ['link', { rel: 'preconnect', href: 'https://github.com' }]
   ],
   themeConfig: {
+    siteTitle: 'jacen.',
     nav,
     sidebar,
     outline: [2, 4],

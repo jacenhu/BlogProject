@@ -37,6 +37,4 @@ featured:
     link: /program/paper/gfs.html
 ---
 
-<BlogHome :featured="$frontmatter.featured">
-  <TopicCarousel :items="$frontmatter.topics" />
-</BlogHome>
+<BlogHome :featured="$frontmatter.featured" :topics="$frontmatter.topics" />
