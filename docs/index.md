@@ -1,7 +1,6 @@
 ---
 layout: home
-hero:
-  tagline: 系统编程、大模型推理与分布式架构
+markdownStyles: false
 topics:
   - title: C++ & 系统
     icon: 🖥️
@@ -23,6 +22,21 @@ topics:
     icon: 📖
     link: /program/#论文
     description: GFS 经典论文阅读、性能压测、开发环境配置
+featured:
+  - category: 推理系统
+    title: KV Cache 核心知识体系
+    description: 从显存估算、分页管理到前缀复用，梳理大模型推理的关键机制。
+    link: /program/interview/aiinfra_kvcache_deep_dive.html
+  - category: 源码阅读
+    title: SGLang 的 Llama 模型实现
+    description: 沿着模型结构与执行路径，理解推理引擎中的 Llama 实现。
+    link: /program/models/sglang_llama_model.html
+  - category: 分布式存储
+    title: 重读 Google File System
+    description: 从架构、租约与副本管理，理解经典分布式文件系统的设计取舍。
+    link: /program/paper/gfs.html
 ---
 
-<TopicCarousel :items="$frontmatter.topics" />
+<BlogHome :featured="$frontmatter.featured">
+  <TopicCarousel :items="$frontmatter.topics" />
+</BlogHome>

@@ -26,9 +26,9 @@ npm audit      # 检查包含开发依赖在内的安全告警
 | `docs/program/**/*.md` | 技术文章，保留现有路径可避免旧链接失效 |
 | `docs/.vitepress/sidebar.json` | 文章分类、顺序与标题的唯一目录配置 |
 | `docs/program/index.md` | 技术首页，`<!-- @catalog -->` 在 Markdown 编译前展开为目录 |
-| `docs/index.md` | 首页文案与专题卡片数据 |
+| `docs/index.md` | 首页文案、专题卡片与精选文章数据 |
 | `docs/.vitepress/nav.json` | 顶部导航 |
-| `docs/.vitepress/theme/components/` | 首页轮播、侧边栏折叠组件及其样式 |
+| `docs/.vitepress/theme/components/` | 首页布局、轮播、侧边栏折叠组件及其样式 |
 | `docs/.vitepress/theme/style.css` | 全站主题样式 |
 | `docs/public/` | 原始静态资源，构建不会改写这些文件 |
 

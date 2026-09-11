@@ -82,125 +82,27 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-/* ── Carousel ── */
-.carousel-wrapper {
-  max-width: 780px;
-  margin: 0 auto;
-  padding: 0 1rem 2rem;
-}
-
-.carousel-row {
-  display: flex;
-  align-items: center;
-}
-
-.carousel-viewport {
-  flex: 1;
-  overflow: hidden;
-}
-
-/* ── Arrows ── */
-.carousel-arrow {
-  flex-shrink: 0;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border: 1px solid var(--vp-c-text-3);
-  background: var(--vp-c-bg);
-  color: var(--vp-c-text-1);
-  font-size: 1.2rem;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: border-color 0.2s, background 0.2s;
-  line-height: 1;
-  padding: 0;
-  margin: 0 0.15rem;
-}
-
-.carousel-arrow:hover {
-  border-color: var(--vp-c-brand-1);
-  background: var(--vp-c-bg-soft);
-}
-
-.carousel-track {
-  display: flex;
-  transition: transform 0.5s ease;
-}
-
-.carousel-card {
-  flex: 0 0 calc(100% / 3);
-  min-width: calc(100% / 3);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  padding: 1.5rem 1rem;
-  border-radius: 12px;
-  border: 1px solid var(--vp-c-bg-soft);
-  background: var(--vp-c-bg-soft);
-  text-decoration: none !important;
-  transition: border-color 0.25s, background 0.25s;
-  box-sizing: border-box;
-}
-
-.carousel-card:hover {
-  border-color: var(--vp-c-brand-1);
-  background: var(--vp-c-bg);
-}
-
-.card-icon {
-  font-size: 2rem;
-  margin-bottom: 0.5rem;
-}
-
-.card-title {
-  font-size: 1rem;
-  font-weight: 600;
-  color: var(--vp-c-text-1);
-  margin-bottom: 0.3rem;
-}
-
-.card-desc {
-  font-size: 0.8rem;
-  color: var(--vp-c-text-2);
-  line-height: 1.5;
-}
-
-/* ── Dots ── */
-.carousel-dots {
-  display: flex;
-  justify-content: center;
-  gap: 0.5rem;
-  margin-top: 1rem;
-}
-
-.carousel-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  border: 1px solid var(--vp-c-text-3);
-  background: transparent;
-  cursor: pointer;
-  padding: 0;
-  transition: background 0.3s, border-color 0.3s;
-}
-
-.carousel-dot.active {
-  background: var(--vp-c-brand-1);
-  border-color: var(--vp-c-brand-1);
-}
-
-/* ── Mobile ── */
+.carousel-wrapper { width: 100%; margin: 0 auto; }
+.carousel-row { display: flex; align-items: center; gap: 12px; }
+.carousel-viewport { flex: 1; min-width: 0; overflow: hidden; }
+.carousel-track { display: flex; transition: transform .4s ease; }
+.carousel-card { flex: 0 0 calc(100% / 3); min-width: 0; display: flex; flex-direction: column; align-items: flex-start; padding: 22px 24px; border-right: 1px solid var(--vp-c-divider); background: var(--vp-c-bg-soft); text-decoration: none !important; box-sizing: border-box; transition: background .2s; }
+.carousel-card:hover { background: var(--vp-c-brand-soft); }
+.card-icon { font-size: 23px; margin-bottom: 18px; }
+.card-title { font-size: 17px; font-weight: 600; color: var(--vp-c-text-1); margin-bottom: 8px; }
+.card-desc { font-size: 14px; color: var(--vp-c-text-2); line-height: 1.8; }
+.carousel-arrow { flex-shrink: 0; width: 34px; height: 44px; border: 1px solid var(--vp-c-border); background: var(--vp-c-bg); border-radius: 7px; color: var(--vp-c-text-2); font-size: 22px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.carousel-arrow:hover { color: var(--vp-c-brand-1); border-color: var(--vp-c-brand-1); }
+.carousel-dots { display: flex; justify-content: center; margin-top: 12px; }
+.carousel-dot { display: grid; place-items: center; width: 28px; height: 28px; cursor: pointer; }
+.carousel-dot::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--vp-c-border); transition: width .2s, background .2s; }
+.carousel-dot.active::before { width: 18px; border-radius: 4px; background: var(--vp-c-brand-1); }
 @media (max-width: 640px) {
-  .carousel-card {
-    flex: 0 0 100%;
-    min-width: 100%;
-  }
+  .carousel-row { gap: 8px; }
+  .carousel-card { flex-basis: 100%; padding: 22px; border: 0; border-radius: 8px; }
+  .carousel-arrow { width: 30px; }
 }
-
 @media (prefers-reduced-motion: reduce) {
-  .carousel-track { transition: none; }
+  .carousel-track, .carousel-card, .carousel-dot::before { transition: none; }
 }
 </style>
