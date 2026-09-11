@@ -15,12 +15,15 @@
   "author": "Jacen Hu",
   "license": "MIT",
   "overrides": {
+    "speech-rule-engine": {
+      "@xmldom/xmldom": "0.9.12"
+    },
     "esbuild": "0.25.12",
     "vite": "6.4.3"
   },
   "devDependencies": {
     "markdown-it-mathjax3": "^4.3.2",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.4",
     "vitepress": "^1.6.4"
   }
 }
