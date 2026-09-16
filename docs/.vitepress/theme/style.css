@@ -1,39 +1,49 @@
 /* Shared palette and type scale for the home page and technical notes. */
 :root {
-  --vp-c-brand-1: #4c739d;
-  --vp-c-brand-2: #3a5e85;
-  --vp-c-brand-3: #4c739d;
-  --vp-c-brand-soft: #eaf2fb;
-  --vp-c-text-1: #293646;
-  --vp-c-text-2: #5f6c7b;
-  --vp-c-text-3: #6e7a89;
-  --vp-c-bg: #fcfdfc;
-  --vp-c-bg-alt: #f3f7fa;
-  --vp-c-bg-soft: #eef4f7;
+  --vp-c-brand-1: #326f8a;
+  --vp-c-brand-2: #255a71;
+  --vp-c-brand-3: #326f8a;
+  --vp-c-brand-soft: #e8f2f6;
+  --vp-c-text-1: #203b4a;
+  --vp-c-text-2: #526a76;
+  --vp-c-text-3: #687c87;
+  --vp-c-bg: #fbfdfd;
+  --vp-c-bg-alt: #f1f6f7;
+  --vp-c-bg-soft: #edf4f6;
   --vp-c-bg-elv: #ffffff;
-  --vp-c-border: #d5e0e8;
-  --vp-c-divider: #e3ebf0;
-  --vp-c-gutter: #e3ebf0;
+  --vp-c-border: #cbdde4;
+  --vp-c-divider: #dbe7ec;
+  --vp-c-gutter: #dbe7ec;
+  --blog-map-bg: #edf5f8;
+  --blog-mint: #dcefe7;
+  --blog-sand: #f4e5d6;
+  --blog-page: #9cc7b7;
+  --blog-connector: #779aa9;
   --vp-sidebar-width: 260px;
-  --vp-font-family-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --vp-font-family-base: 'Avenir Next', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   --blog-font-mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
   --vp-font-family-mono: var(--blog-font-mono);
 }
 .dark {
-  --vp-c-brand-1: #9ac4ed;
-  --vp-c-brand-2: #c4def5;
-  --vp-c-brand-3: #739fca;
-  --vp-c-brand-soft: #2b3e52;
-  --vp-c-text-1: #e7eef7;
-  --vp-c-text-2: #b7c6d7;
-  --vp-c-text-3: #9bacbf;
-  --vp-c-bg: #1c2530;
-  --vp-c-bg-alt: #222d3a;
-  --vp-c-bg-soft: #283545;
-  --vp-c-bg-elv: #283545;
-  --vp-c-border: #45596f;
-  --vp-c-divider: #35465a;
-  --vp-c-gutter: #35465a;
+  --blog-map-bg: #213d4a;
+  --blog-mint: #294b45;
+  --blog-sand: #4a4036;
+  --blog-page: #6a9b8b;
+  --blog-connector: #8bafbd;
+  --vp-c-brand-1: #98cddd;
+  --vp-c-brand-2: #bee3ed;
+  --vp-c-brand-3: #77aebb;
+  --vp-c-brand-soft: #263e4b;
+  --vp-c-text-1: #e3eff2;
+  --vp-c-text-2: #b3c7cf;
+  --vp-c-text-3: #96adb7;
+  --vp-c-bg: #182b36;
+  --vp-c-bg-alt: #203540;
+  --vp-c-bg-soft: #263e49;
+  --vp-c-bg-elv: #263e49;
+  --vp-c-border: #45636f;
+  --vp-c-divider: #344e5a;
+  --vp-c-gutter: #344e5a;
 }
 ::selection { background: var(--vp-c-brand-soft); color: var(--vp-c-brand-1); }
 a, button { -webkit-tap-highlight-color: transparent; }
