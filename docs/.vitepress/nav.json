@@ -1,6 +1,7 @@
 [
   { "text": "首页", "link": "/" },
   { "text": "技术笔记", "link": "/program/" },
+  { "text": "AI Infra 图文", "link": "/ai-infra/", "activeMatch": "^/ai-infra/" },
   {
     "text": "其他平台",
     "items": [

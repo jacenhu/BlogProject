@@ -274,5 +274,26 @@
       "collapsed": true,
       "items": []
     }
+  ],
+  "/ai-infra/": [
+    {
+      "text": "AI Infra 图文",
+      "items": [
+        {
+          "text": "栏目首页",
+          "link": "/ai-infra/"
+        }
+      ]
+    },
+    {
+      "text": "推理系统",
+      "collapsed": false,
+      "items": [
+        {
+          "text": "SGLang 并行策略分析",
+          "link": "/ai-infra/sglang-parallelism"
+        }
+      ]
+    }
   ]
 }

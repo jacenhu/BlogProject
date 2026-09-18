@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1390" viewBox="0 0 900 1390">
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8" fill="#748A90"/></marker></defs>
+<rect width="900" height="1390" fill="#F7FAF9"/>
+<text x="48" y="52" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="23" fill="#087E82" font-weight="700" text-anchor="start">SGLANG  /  并行策略  /  02</text>
+<text x="48" y="113" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="43" fill="#16333B" font-weight="700" text-anchor="start">同样 8 卡，两种 DP 布局</text>
+<text x="48" y="162" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="28" fill="#61757B" font-weight="400" text-anchor="start">完整模型副本 ≠ Attention 计算组。</text>
+<line x1="48" y1="1328" x2="852" y2="1328" stroke="#D4DFDF" stroke-width="2"/>
+<text x="48" y="1365" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="23" fill="#61757B" font-weight="400" text-anchor="start">概念示意 · 组合需满足模型与后端约束</text>
+<rect x="48" y="202" width="804" height="374" rx="16" fill="white" stroke="#D5E2E2" stroke-width="2"/>
+<text x="76" y="249" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="34" fill="#087E82" font-weight="700" text-anchor="start">普通 DP=2 · 每副本 TP=4</text>
+<text x="76" y="293" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="28" fill="#61757B" font-weight="400" text-anchor="start">两个独立逻辑模型，各自处理请求。</text>
+<text x="76" y="360" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="30" fill="#3669AE" font-weight="600" text-anchor="start">副本 0</text>
+<rect x="230" y="322" width="131" height="62" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="295.5" y="361" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">GPU 0</text>
+<rect x="377" y="322" width="131" height="62" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="442.5" y="361" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">GPU 1</text>
+<rect x="524" y="322" width="131" height="62" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="589.5" y="361" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">GPU 2</text>
+<rect x="671" y="322" width="131" height="62" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="736.5" y="361" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">GPU 3</text>
+<text x="76" y="473" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="30" fill="#3669AE" font-weight="600" text-anchor="start">副本 1</text>
+<rect x="230" y="435" width="131" height="62" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="295.5" y="474" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">GPU 4</text>
+<rect x="377" y="435" width="131" height="62" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="442.5" y="474" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">GPU 5</text>
+<rect x="524" y="435" width="131" height="62" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="589.5" y="474" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">GPU 6</text>
+<rect x="671" y="435" width="131" height="62" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="736.5" y="474" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">GPU 7</text>
+<text x="76" y="551" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="30" fill="#16333B" font-weight="600" text-anchor="start">总卡数：2 × 4 = 8</text>
+<rect x="48" y="600" width="804" height="667" rx="16" fill="white" stroke="#D5E2E2" stroke-width="2"/>
+<text x="76" y="647" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="34" fill="#087E82" font-weight="700" text-anchor="start">DP Attention=4 · 基础 TP=8</text>
+<text x="76" y="691" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="28" fill="#61757B" font-weight="400" text-anchor="start">Attention CP=1，MoE DP=1，EP=8。</text>
+<text x="76" y="735" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="31" fill="#3669AE" font-weight="600" text-anchor="start">Attention 层：4 组，每组 TP=2</text>
+<rect x="76" y="762" width="170" height="137" rx="16" fill="#EAF2FA" stroke="#C3D3E7" stroke-width="2"/>
+<text x="161" y="805" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#3669AE" font-weight="600" text-anchor="middle">请求组 0</text>
+<text x="161" y="861" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="26" fill="#16333B" font-weight="400" text-anchor="middle">GPU 0 / 1</text>
+<rect x="263" y="762" width="170" height="137" rx="16" fill="#EAF2FA" stroke="#C3D3E7" stroke-width="2"/>
+<text x="348" y="805" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#3669AE" font-weight="600" text-anchor="middle">请求组 1</text>
+<text x="348" y="861" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="26" fill="#16333B" font-weight="400" text-anchor="middle">GPU 2 / 3</text>
+<rect x="450" y="762" width="170" height="137" rx="16" fill="#EAF2FA" stroke="#C3D3E7" stroke-width="2"/>
+<text x="535" y="805" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#3669AE" font-weight="600" text-anchor="middle">请求组 2</text>
+<text x="535" y="861" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="26" fill="#16333B" font-weight="400" text-anchor="middle">GPU 4 / 5</text>
+<rect x="637" y="762" width="170" height="137" rx="16" fill="#EAF2FA" stroke="#C3D3E7" stroke-width="2"/>
+<text x="722" y="805" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#3669AE" font-weight="600" text-anchor="middle">请求组 3</text>
+<text x="722" y="861" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="26" fill="#16333B" font-weight="400" text-anchor="middle">GPU 6 / 7</text>
+<line x1="450" y1="918" x2="450" y2="974" stroke="#748A90" stroke-width="3" marker-end="url(#arrow)"/>
+<text x="76" y="1020" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="31" fill="#087E82" font-weight="600" text-anchor="start">MoE 层：同一组 8 卡组成 EP=8</text>
+<rect x="76" y="1044" width="81" height="90" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="116.5" y="1082" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="23" fill="#16333B" font-weight="500" text-anchor="middle">GPU</text>
+<text x="116.5" y="1118" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">0</text>
+<rect x="170" y="1044" width="81" height="90" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="210.5" y="1082" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="23" fill="#16333B" font-weight="500" text-anchor="middle">GPU</text>
+<text x="210.5" y="1118" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">1</text>
+<rect x="264" y="1044" width="81" height="90" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="304.5" y="1082" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="23" fill="#16333B" font-weight="500" text-anchor="middle">GPU</text>
+<text x="304.5" y="1118" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">2</text>
+<rect x="358" y="1044" width="81" height="90" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="398.5" y="1082" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="23" fill="#16333B" font-weight="500" text-anchor="middle">GPU</text>
+<text x="398.5" y="1118" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">3</text>
+<rect x="452" y="1044" width="81" height="90" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="492.5" y="1082" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="23" fill="#16333B" font-weight="500" text-anchor="middle">GPU</text>
+<text x="492.5" y="1118" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">4</text>
+<rect x="546" y="1044" width="81" height="90" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="586.5" y="1082" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="23" fill="#16333B" font-weight="500" text-anchor="middle">GPU</text>
+<text x="586.5" y="1118" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">5</text>
+<rect x="640" y="1044" width="81" height="90" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="680.5" y="1082" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="23" fill="#16333B" font-weight="500" text-anchor="middle">GPU</text>
+<text x="680.5" y="1118" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">6</text>
+<rect x="734" y="1044" width="81" height="90" rx="10" fill="#E7F4F1" stroke="#BAD9D5" stroke-width="2"/>
+<text x="774.5" y="1082" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="23" fill="#16333B" font-weight="500" text-anchor="middle">GPU</text>
+<text x="774.5" y="1118" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="29" fill="#16333B" font-weight="600" text-anchor="middle">7</text>
+<text x="76" y="1178" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="31" fill="#16333B" font-weight="600" text-anchor="start">不同层复用同一批 GPU。</text>
+<text x="76" y="1227" font-family="'Hiragino Sans GB', 'PingFang SC', sans-serif" font-size="30" fill="#B36A32" font-weight="600" text-anchor="start">总卡数仍为 8，不是 8 × 4 × 8。</text>
+</svg>

@@ -1,6 +1,6 @@
 # Jacen's Blog
 
-基于 VitePress 的技术博客，文章位于 `docs/program/`。
+基于 VitePress 的技术博客，技术笔记位于 `docs/program/`，AI Infra 图文栏目位于 `docs/ai-infra/`。
 
 ## 本地开发
 
@@ -24,6 +24,8 @@ npm audit      # 检查包含开发依赖在内的安全告警
 | 位置 | 用途 |
 | --- | --- |
 | `docs/program/**/*.md` | 技术文章，保留现有路径可避免旧链接失效 |
+| `docs/ai-infra/*.md` | AI Infra 图文文章及独立栏目首页 |
+| `docs/public/img/ai-infra/<文章名>/` | 图文栏目的高清 PNG 与可编辑 SVG 原图 |
 | `docs/.vitepress/sidebar.json` | 文章分类、顺序与标题的唯一目录配置 |
 | `docs/program/index.md` | 技术首页，`<!-- @catalog -->` 在 Markdown 编译前展开为目录 |
 | `docs/index.md` | 首页文案、专题卡片与精选文章数据 |
@@ -36,6 +38,11 @@ npm audit      # 检查包含开发依赖在内的安全告警
 `sidebar.json` 中添加一条链接；侧边栏与技术首页会同时更新。
 目录以普通 Markdown 编译，因此保留页内锚点、右侧大纲和 VitePress 链接检查。
 修改后运行 `npm test` 和 `npm run build`。
+
+新增 AI Infra 图文时，在 `docs/ai-infra/` 创建 Markdown，将配图放入
+`docs/public/img/ai-infra/<文章名>/`，正文使用 `/img/ai-infra/<文章名>/...` 引用。
+在 `sidebar.json` 的 `/ai-infra/` 分组登记文章，并更新栏目首页的文章介绍。
+需要首页推荐时，再修改 `docs/index.md` 的 `featured`；无需新增页面组件。
 
 首页通过推理过程示意图链接相关笔记，文章与专题导航分别展示，支持键盘访问。
 侧边栏折叠偏好保存在本地；移动端继续使用 VitePress 自带的目录按钮。

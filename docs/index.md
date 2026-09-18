@@ -2,6 +2,10 @@
 layout: home
 markdownStyles: false
 topics:
+  - title: AI Infra 图文
+    icon: layers
+    link: /ai-infra/
+    description: 配合技术示意图，分析 GPU、推理引擎与分布式推理
   - title: C++ & 系统
     icon: system
     link: /program/#c
@@ -23,6 +27,10 @@ topics:
     link: /program/#论文
     description: GFS 经典论文阅读、性能压测、开发环境配置
 featured:
+  - category: AI Infra 图文
+    title: SGLang 并行策略分析
+    description: 从切分对象、通信代价和显存布局，理解一组 GPU 如何组合 TP、DP、EP 与 DCP。
+    link: /ai-infra/sglang-parallelism.html
   - category: 推理系统
     title: KV Cache 核心知识体系
     description: 从显存估算、分页管理到前缀复用，梳理大模型推理的关键机制。

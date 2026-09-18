@@ -4,6 +4,7 @@ import { useSidebar } from 'vitepress/theme'
 
 const STORAGE_KEY = 'vp-sidebar-collapsed'
 const { isSidebarEnabled } = useSidebar()
+const mounted = ref(false)
 const collapsed = ref(false)
 const label = computed(() => collapsed.value ? '展开侧边栏' : '收起侧边栏')
 
@@ -17,6 +18,7 @@ function toggle() {
 }
 
 onMounted(() => {
+  mounted.value = true
   try {
     collapsed.value = localStorage.getItem(STORAGE_KEY) === 'true'
   } catch {
@@ -31,7 +33,7 @@ onUnmounted(() => document.documentElement.classList.remove('sidebar-collapsed')
 </script>
 
 <template>
-  <template v-if="isSidebarEnabled">
+  <template v-if="mounted && isSidebarEnabled">
     <div v-if="collapsed" class="sidebar-hover-zone" aria-hidden="true" />
     <button
       class="sidebar-toggle-btn"
